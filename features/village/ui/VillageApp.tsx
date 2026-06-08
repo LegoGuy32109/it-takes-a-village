@@ -142,6 +142,26 @@ function displayName(name: string, fallback: string) {
   return trimName(name) || fallback;
 }
 
+function shortId(value: string | null | undefined): string {
+  if (!value) return "";
+  return value.length <= 8 ? value : `${value.slice(0, 4)}...${value.slice(-4)}`;
+}
+
+function signalPayloadKind(
+  payload: RTCIceCandidateInit | RTCSessionDescriptionInit,
+): string {
+  const description = payload as RTCSessionDescriptionInit;
+  if (typeof description.type === "string") return `sdp:${description.type}`;
+
+  const candidate = payload as RTCIceCandidateInit;
+  if (typeof candidate.candidate !== "string") return "ice:unknown";
+  const candidateType = candidate.candidate.match(/ typ ([a-z]+)/)?.[1] ??
+    "unknown";
+  const protocol = candidate.candidate.match(/ udp | tcp /)?.[0]?.trim() ??
+    "unknown";
+  return `ice:${candidateType}:${protocol}`;
+}
+
 const PLACEHOLDER_DISPLAY_STATE = createVillageState(
   "pending",
   "HOST00",
@@ -191,6 +211,34 @@ export default function VillageApp(
   const gameStateRef = useRef(displayState);
   const reconnectTimerRef = useRef<number | null>(null);
 
+  function debugLog(event: string, fields: Record<string, unknown> = {}) {
+    const payload = {
+      event,
+      mode,
+      resolvedRole,
+      isDisplayMode,
+      clientId: shortId(clientIdRef.current),
+      participantId: shortId(participantId),
+      sessionId: isDisplayMode ? displayState.sessionId : undefined,
+      joinCode: joinCode ? `****${joinCode.slice(-2)}` : undefined,
+      signalStatus,
+      ...fields,
+    };
+
+    console.info("[village:client]", payload);
+
+    try {
+      fetch("/api/village/client-log", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+        keepalive: true,
+      }).catch(() => {});
+    } catch {
+      // Diagnostic logging should never affect gameplay.
+    }
+  }
+
   useEffect(() => {
     const storedName = readStoredValue(PARTICIPANT_NAME_STORAGE_KEY);
     setParticipantName(storedName);
@@ -207,6 +255,11 @@ export default function VillageApp(
     }
 
     setBooted(true);
+    debugLog("boot", {
+      hasJoinCode: Boolean(joinCode),
+      storedName: Boolean(storedName),
+      iceServerCount: iceServers.length,
+    });
   }, [joinCode]);
 
   useEffect(() => {
@@ -263,16 +316,38 @@ export default function VillageApp(
 
   function sendSignalMessage(message: SignalClientMessage) {
     const socket = signalSocketRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      debugLog("signal_send_skipped_socket_not_open", {
+        messageType: message.type,
+        readyState: socket?.readyState ?? "missing",
+      });
+      return;
+    }
+    debugLog("signal_send", {
+      messageType: message.type,
+      targetClientId: message.type === "signal"
+        ? shortId(message.targetClientId)
+        : undefined,
+      payloadKind: message.type === "signal"
+        ? signalPayloadKind(message.payload)
+        : undefined,
+    });
     socket.send(JSON.stringify(message));
   }
 
   function sendControllerEnvelope(envelope: ControllerEnvelope) {
+    let sentCount = 0;
     for (const channel of peerChannelsRef.current.values()) {
       if (channel.readyState === "open") {
         channel.send(JSON.stringify(envelope));
+        sentCount += 1;
       }
     }
+    debugLog("controller_envelope_send", {
+      eventType: envelope.event.type,
+      sentCount,
+      channelCount: peerChannelsRef.current.size,
+    });
   }
 
   function sendSnapshotToControllers(state: VillageState) {
@@ -289,6 +364,12 @@ export default function VillageApp(
   }
 
   function commitDisplayEvent(event: Parameters<typeof reduceVillageState>[1]) {
+    debugLog("display_commit_event", {
+      eventType: event.type,
+      participantId: "participantId" in event
+        ? shortId(event.participantId)
+        : undefined,
+    });
     const nextState = reduceVillageState(gameStateRef.current, event);
     gameStateRef.current = nextState;
     setDisplayState(nextState);
@@ -296,6 +377,11 @@ export default function VillageApp(
   }
 
   function cleanupPeer(clientId: string) {
+    debugLog("cleanup_peer", {
+      peerId: shortId(clientId),
+      hasConnection: peerConnectionsRef.current.has(clientId),
+      hasChannel: peerChannelsRef.current.has(clientId),
+    });
     const channel = peerChannelsRef.current.get(clientId);
     if (channel) {
       channel.close();
@@ -329,9 +415,18 @@ export default function VillageApp(
   }
 
   function attachChannelHandlers(peerId: string, channel: RTCDataChannel) {
+    debugLog("datachannel_attach", {
+      peerId: shortId(peerId),
+      label: channel.label,
+      readyState: channel.readyState,
+    });
     peerChannelsRef.current.set(peerId, channel);
 
     channel.addEventListener("open", () => {
+      debugLog("datachannel_open", {
+        peerId: shortId(peerId),
+        label: channel.label,
+      });
       setSignalStatus(isDisplayMode ? "Display connected" : "Connected");
       if (!isDisplayMode) {
         channel.send(JSON.stringify(
@@ -349,6 +444,10 @@ export default function VillageApp(
     });
 
     channel.addEventListener("close", () => {
+      debugLog("datachannel_close", {
+        peerId: shortId(peerId),
+        label: channel.label,
+      });
       peerChannelsRef.current.delete(peerId);
       if (!isDisplayMode) {
         setSignalStatus("Waiting for display");
@@ -361,6 +460,13 @@ export default function VillageApp(
         const payload = JSON.parse(String(event.data)) as
           | ControllerEnvelope
           | SnapshotEnvelope;
+        debugLog("datachannel_message", {
+          peerId: shortId(peerId),
+          kind: payload.kind,
+          eventType: payload.kind === "controller_event"
+            ? payload.event.type
+            : undefined,
+        });
 
         if (isDisplayMode) {
           if (payload.kind !== "controller_event") return;
@@ -407,6 +513,7 @@ export default function VillageApp(
         if (payload.kind !== "snapshot") return;
         setControllerSnapshot(payload.snapshot);
       } catch {
+        debugLog("datachannel_message_malformed", { peerId: shortId(peerId) });
         setTransportError("Received malformed realtime data.");
       }
     });
@@ -421,8 +528,17 @@ export default function VillageApp(
       const candidates = pendingCandidatesRef.current.get(peerId) ?? [];
       candidates.push(candidate);
       pendingCandidatesRef.current.set(peerId, candidates);
+      debugLog("ice_candidate_queued", {
+        peerId: shortId(peerId),
+        payloadKind: signalPayloadKind(candidate),
+        queueLength: candidates.length,
+      });
       return;
     }
+    debugLog("ice_candidate_add", {
+      peerId: shortId(peerId),
+      payloadKind: signalPayloadKind(candidate),
+    });
     await connection.addIceCandidate(candidate);
   }
 
@@ -432,21 +548,43 @@ export default function VillageApp(
   ) {
     const candidates = pendingCandidatesRef.current.get(peerId) ?? [];
     pendingCandidatesRef.current.delete(peerId);
+    debugLog("ice_candidates_flush", {
+      peerId: shortId(peerId),
+      count: candidates.length,
+    });
     for (const candidate of candidates) {
       await connection.addIceCandidate(candidate);
     }
   }
 
   function createDisplayPeerConnection(targetClientId: string) {
-    if (peerConnectionsRef.current.has(targetClientId)) return;
+    if (peerConnectionsRef.current.has(targetClientId)) {
+      debugLog("display_peer_connection_reuse", {
+        peerId: shortId(targetClientId),
+      });
+      return;
+    }
 
+    debugLog("display_peer_connection_create", {
+      peerId: shortId(targetClientId),
+      iceServerCount: iceServers.length,
+    });
     const connection = new RTCPeerConnection({ iceServers });
     const channel = connection.createDataChannel("village-control", {
       ordered: true,
     });
 
     connection.addEventListener("icecandidate", (event) => {
-      if (!event.candidate) return;
+      if (!event.candidate) {
+        debugLog("display_ice_gathering_complete", {
+          peerId: shortId(targetClientId),
+        });
+        return;
+      }
+      debugLog("display_ice_candidate", {
+        peerId: shortId(targetClientId),
+        payloadKind: signalPayloadKind(event.candidate.toJSON()),
+      });
       sendSignalMessage({
         type: "signal",
         targetClientId,
@@ -455,6 +593,13 @@ export default function VillageApp(
     });
 
     connection.addEventListener("connectionstatechange", () => {
+      debugLog("display_peer_connection_state", {
+        peerId: shortId(targetClientId),
+        connectionState: connection.connectionState,
+        iceConnectionState: connection.iceConnectionState,
+        iceGatheringState: connection.iceGatheringState,
+        signalingState: connection.signalingState,
+      });
       if (
         connection.connectionState === "failed" ||
         connection.connectionState === "disconnected" ||
@@ -464,10 +609,30 @@ export default function VillageApp(
       }
     });
 
+    connection.addEventListener("iceconnectionstatechange", () => {
+      debugLog("display_ice_connection_state", {
+        peerId: shortId(targetClientId),
+        iceConnectionState: connection.iceConnectionState,
+      });
+    });
+
+    connection.addEventListener("icegatheringstatechange", () => {
+      debugLog("display_ice_gathering_state", {
+        peerId: shortId(targetClientId),
+        iceGatheringState: connection.iceGatheringState,
+      });
+    });
+
     peerConnectionsRef.current.set(targetClientId, connection);
     attachChannelHandlers(targetClientId, channel);
 
     connection.createOffer()
+      .then((offer) => {
+        debugLog("display_offer_created", {
+          peerId: shortId(targetClientId),
+        });
+        return offer;
+      })
       .then((offer) => connection.setLocalDescription(offer))
       .then(() => {
         if (!connection.localDescription) return;
@@ -478,6 +643,9 @@ export default function VillageApp(
         });
       })
       .catch(() => {
+        debugLog("display_peer_connection_create_failed", {
+          peerId: shortId(targetClientId),
+        });
         setTransportError("Failed to create a display peer connection.");
         cleanupPeer(targetClientId);
       });
@@ -485,13 +653,31 @@ export default function VillageApp(
 
   function createControllerPeerConnection(displayClientId: string) {
     const existing = peerConnectionsRef.current.get(displayClientId);
-    if (existing) return existing;
+    if (existing) {
+      debugLog("controller_peer_connection_reuse", {
+        peerId: shortId(displayClientId),
+      });
+      return existing;
+    }
 
+    debugLog("controller_peer_connection_create", {
+      peerId: shortId(displayClientId),
+      iceServerCount: iceServers.length,
+    });
     const connection = new RTCPeerConnection({ iceServers });
     peerConnectionsRef.current.set(displayClientId, connection);
 
     connection.addEventListener("icecandidate", (event) => {
-      if (!event.candidate) return;
+      if (!event.candidate) {
+        debugLog("controller_ice_gathering_complete", {
+          peerId: shortId(displayClientId),
+        });
+        return;
+      }
+      debugLog("controller_ice_candidate", {
+        peerId: shortId(displayClientId),
+        payloadKind: signalPayloadKind(event.candidate.toJSON()),
+      });
       sendSignalMessage({
         type: "signal",
         targetClientId: displayClientId,
@@ -500,6 +686,13 @@ export default function VillageApp(
     });
 
     connection.addEventListener("connectionstatechange", () => {
+      debugLog("controller_peer_connection_state", {
+        peerId: shortId(displayClientId),
+        connectionState: connection.connectionState,
+        iceConnectionState: connection.iceConnectionState,
+        iceGatheringState: connection.iceGatheringState,
+        signalingState: connection.signalingState,
+      });
       if (
         connection.connectionState === "failed" ||
         connection.connectionState === "disconnected" ||
@@ -509,7 +702,25 @@ export default function VillageApp(
       }
     });
 
+    connection.addEventListener("iceconnectionstatechange", () => {
+      debugLog("controller_ice_connection_state", {
+        peerId: shortId(displayClientId),
+        iceConnectionState: connection.iceConnectionState,
+      });
+    });
+
+    connection.addEventListener("icegatheringstatechange", () => {
+      debugLog("controller_ice_gathering_state", {
+        peerId: shortId(displayClientId),
+        iceGatheringState: connection.iceGatheringState,
+      });
+    });
+
     connection.addEventListener("datachannel", (event) => {
+      debugLog("controller_datachannel_received", {
+        peerId: shortId(displayClientId),
+        label: event.channel.label,
+      });
       attachChannelHandlers(displayClientId, event.channel);
     });
 
@@ -519,6 +730,15 @@ export default function VillageApp(
   function handleSignalMessage(message: SignalServerMessage) {
     switch (message.type) {
       case "signal_ready":
+        debugLog("signal_ready", {
+          role: message.role,
+          sessionId: message.sessionId,
+          peers: message.peers.map((peer) => ({
+            clientId: shortId(peer.clientId),
+            kind: peer.kind,
+            role: peer.role,
+          })),
+        });
         setTransportError("");
         setSignalStatus(
           message.role === "display" ? "Room open" : "Signal ready",
@@ -537,6 +757,13 @@ export default function VillageApp(
         }
         return;
       case "peer_joined":
+        debugLog("peer_joined", {
+          peer: {
+            clientId: shortId(message.peer.clientId),
+            kind: message.peer.kind,
+            role: message.peer.role,
+          },
+        });
         if (
           isDisplayMode && message.peer.kind === "controller" &&
           message.peer.role
@@ -546,15 +773,24 @@ export default function VillageApp(
         }
         return;
       case "peer_left":
+        debugLog("peer_left", { peerId: shortId(message.clientId) });
         cleanupPeer(message.clientId);
         return;
       case "signal": {
+        debugLog("signal_received", {
+          fromClientId: shortId(message.fromClientId),
+          payloadKind: signalPayloadKind(message.payload),
+        });
         if (isDisplayMode) {
           const connection = peerConnectionsRef.current.get(
             message.fromClientId,
           );
           if (!connection) return;
           if (isSessionDescriptionPayload(message.payload)) {
+            debugLog("display_apply_remote_description", {
+              peerId: shortId(message.fromClientId),
+              type: message.payload.type,
+            });
             connection.setRemoteDescription(message.payload)
               .then(() =>
                 flushPendingCandidates(message.fromClientId, connection)
@@ -575,11 +811,20 @@ export default function VillageApp(
         const connection = createControllerPeerConnection(message.fromClientId);
         if (isSessionDescriptionPayload(message.payload)) {
           if (message.payload.type === "offer") {
+            debugLog("controller_apply_offer", {
+              peerId: shortId(message.fromClientId),
+            });
             connection.setRemoteDescription(message.payload)
               .then(() =>
                 flushPendingCandidates(message.fromClientId, connection)
               )
               .then(() => connection.createAnswer())
+              .then((answer) => {
+                debugLog("controller_answer_created", {
+                  peerId: shortId(message.fromClientId),
+                });
+                return answer;
+              })
               .then((answer) => connection.setLocalDescription(answer))
               .then(() => {
                 if (!connection.localDescription) return;
@@ -594,6 +839,10 @@ export default function VillageApp(
               );
             return;
           }
+          debugLog("controller_apply_remote_description", {
+            peerId: shortId(message.fromClientId),
+            type: message.payload.type,
+          });
           connection.setRemoteDescription(message.payload)
             .then(() =>
               flushPendingCandidates(message.fromClientId, connection)
@@ -610,6 +859,7 @@ export default function VillageApp(
         return;
       }
       case "error":
+        debugLog("signal_error_message", { error: message.error });
         setTransportError(message.error);
         return;
     }
@@ -651,10 +901,20 @@ export default function VillageApp(
       signalUrl.searchParams.set("code", joinCode);
     }
 
+    debugLog("websocket_connect", {
+      url: `${signalUrl.protocol}//${signalUrl.host}${signalUrl.pathname}`,
+      kind: isDisplayMode ? "display" : "controller",
+      sessionId: isDisplayMode ? displayState.sessionId : undefined,
+      code: joinCode ? `****${joinCode.slice(-2)}` : undefined,
+      iceServerCount: iceServers.length,
+    });
     const socket = new WebSocket(signalUrl);
     signalSocketRef.current = socket;
 
     socket.addEventListener("open", () => {
+      debugLog("websocket_open", {
+        kind: isDisplayMode ? "display" : "controller",
+      });
       setSignalStatus(isDisplayMode ? "Room open" : "Waiting for display");
       if (isDisplayMode) {
         sendSignalMessage({
@@ -667,6 +927,10 @@ export default function VillageApp(
     });
 
     socket.addEventListener("message", (event) => {
+      debugLog("websocket_message", {
+        dataType: typeof event.data,
+        byteLength: typeof event.data === "string" ? event.data.length : null,
+      });
       parseSignalMessageData(event.data)
         .then((message) => {
           if (!disposed) handleSignalMessage(message);
@@ -677,6 +941,7 @@ export default function VillageApp(
     });
 
     socket.addEventListener("close", () => {
+      debugLog("websocket_close");
       if (disposed) return;
       setSignalStatus("Disconnected");
       if (!isDisplayMode) setControllerSnapshot(null);
@@ -690,6 +955,7 @@ export default function VillageApp(
     });
 
     socket.addEventListener("error", () => {
+      debugLog("websocket_error");
       setTransportError("Realtime signaling failed.");
     });
 
@@ -711,6 +977,13 @@ export default function VillageApp(
   function submitName(event: Event) {
     event.preventDefault();
     const nextName = trimName(draftName);
+    debugLog("submit_name", {
+      hasName: Boolean(nextName),
+      channelCount: peerChannelsRef.current.size,
+      openChannelCount: [...peerChannelsRef.current.values()].filter((
+        channel,
+      ) => channel.readyState === "open").length,
+    });
     setDraftName(nextName);
     setParticipantName(nextName);
     if (!isDisplayMode) {
