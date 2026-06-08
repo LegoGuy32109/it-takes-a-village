@@ -6,9 +6,9 @@ export default define.page(function App({ Component }) {
       <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>it-takes-a-village</title>
+        <title>It Takes a Village</title>
       </head>
-      <body>
+      <body class="bg-[#fff7fb]">
         <Component />
       </body>
     </html>
