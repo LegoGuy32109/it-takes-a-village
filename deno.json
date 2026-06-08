@@ -58,5 +58,10 @@
     "types": [
       "vite/client"
     ]
+  },
+  "deploy": {
+    "org": "legoguy32109",
+    "app": "it-takes-a-village"
   }
 }
+
