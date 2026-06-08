@@ -29,15 +29,18 @@ function createSessionId(): string {
 }
 
 function createJoinCode(excluded?: string): string {
-  const alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
   let code = "";
   do {
     code = Array.from(
       { length: 6 },
-      () => alphabet[Math.floor(Math.random() * alphabet.length)],
+      () => Math.floor(Math.random() * 10).toString(),
     ).join("");
-  } while (code === excluded);
+  } while (code === excluded || !hasRepeatedDigit(code));
   return code;
+}
+
+function hasRepeatedDigit(code: string): boolean {
+  return new Set(code).size < code.length;
 }
 
 function createClientId(): string {
