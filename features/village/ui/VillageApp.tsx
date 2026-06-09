@@ -30,14 +30,11 @@ interface VillageAppProps {
 const PARTICIPANT_ID_STORAGE_KEY = "village:participant-id";
 const PARTICIPANT_NAME_STORAGE_KEY = "village:participant-name";
 const PLAYER_COLORS = [
-  0xf3a7c8,
-  0x9ec5fe,
-  0xb8d8c0,
-  0xffd166,
-  0xcdb4db,
-  0xffaf87,
-  0xa7f3d0,
-  0xfbcfe8,
+  0xffdbdb,
+  0xcff1fb,
+  0xd1d1f9,
+  0xd6fbe4,
+  0xfcfdcd,
 ];
 
 function createSessionId(): string {
@@ -164,12 +161,50 @@ function displayGameName(name: string): string {
   return `${trimmed.slice(0, 11)}-`;
 }
 
-function colorForParticipant(participantId: string): number {
+function hashString(value: string): number {
   let hash = 0;
-  for (let index = 0; index < participantId.length; index += 1) {
-    hash = (hash * 31 + participantId.charCodeAt(index)) >>> 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
   }
-  return PLAYER_COLORS[hash % PLAYER_COLORS.length];
+  return hash;
+}
+
+function seededUnit(seed: number): number {
+  let value = seed >>> 0;
+  value += 0x6d2b79f5;
+  value = Math.imul(value ^ (value >>> 15), value | 1);
+  value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+  return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+}
+
+function clampColorChannel(value: number): number {
+  return Math.min(255, Math.max(0, Math.round(value)));
+}
+
+function shiftColorBrightness(color: number, amount: number): number {
+  const red = (color >> 16) & 255;
+  const green = (color >> 8) & 255;
+  const blue = color & 255;
+  const shift = (channel: number) =>
+    amount >= 0 ? channel + (255 - channel) * amount : channel * (1 + amount);
+
+  return (clampColorChannel(shift(red)) << 16) |
+    (clampColorChannel(shift(green)) << 8) |
+    clampColorChannel(shift(blue));
+}
+
+function colorForParticipant(participantId: string): number {
+  const seed = hashString(participantId);
+  const baseColor = PLAYER_COLORS[seed % PLAYER_COLORS.length];
+  const brightness = (seededUnit(seed ^ 0xa5a5a5a5) - 0.5) * 0.18;
+  return shiftColorBrightness(baseColor, brightness);
+}
+
+function createRandomPlayerColor(): number {
+  const baseColor =
+    PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)];
+  const brightness = (Math.random() - 0.5) * 0.22;
+  return shiftColorBrightness(baseColor, brightness);
 }
 
 function shortId(value: string | null | undefined): string {
@@ -237,6 +272,7 @@ export default function VillageApp(
   const gamePhaseRef = useRef<"lobby" | "playing">("lobby");
   const gamePlayersRef = useRef<GameStartedPlayer[]>([]);
   const gameInputsRef = useRef(new Map<string, VillagePlayerInput>());
+  const actionPressedRef = useRef(new Map<string, boolean>());
   const signalSocketRef = useRef<WebSocket | null>(null);
   const peerConnectionsRef = useRef(new Map<string, RTCPeerConnection>());
   const peerChannelsRef = useRef(new Map<string, RTCDataChannel>());
@@ -468,6 +504,32 @@ export default function VillageApp(
     broadcastGameStarted(playersForGame);
   }
 
+  function rerollPlayerColor(participantId: string) {
+    const nextPlayers = gamePlayersRef.current.map((player) =>
+      player.id === participantId
+        ? { ...player, color: createRandomPlayerColor() }
+        : player
+    );
+    gamePlayersRef.current = nextPlayers;
+    setGamePlayers(nextPlayers);
+    debugLog("player_color_reroll", {
+      participantId: shortId(participantId),
+    });
+  }
+
+  function applyPlayerInput(
+    participantId: string,
+    input: VillagePlayerInput,
+  ) {
+    const wasActionPressed = actionPressedRef.current.get(participantId) ??
+      false;
+    gameInputsRef.current.set(participantId, input);
+    actionPressedRef.current.set(participantId, input.action_pressed);
+    if (input.action_pressed && !wasActionPressed) {
+      rerollPlayerColor(participantId);
+    }
+  }
+
   function commitDisplayEvent(event: Parameters<typeof reduceVillageState>[1]) {
     debugLog("display_commit_event", {
       eventType: event.type,
@@ -631,10 +693,7 @@ export default function VillageApp(
             return;
           }
           if (payload.event.type === "input") {
-            gameInputsRef.current.set(
-              participantIdFromPeer,
-              payload.event.input,
-            );
+            applyPlayerInput(participantIdFromPeer, payload.event.input);
             return;
           }
           commitDisplayEvent({

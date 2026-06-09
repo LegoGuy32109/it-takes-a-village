@@ -11,18 +11,45 @@ interface RenderedPlayer {
   id: string;
   body: import("pixi.js").Graphics;
   label: import("pixi.js").Text;
+  color: number;
   x: number;
   y: number;
 }
 
 const PLAYER_SIZE = 34;
+const PLAYER_BORDER_SIZE = 2;
 const PLAYER_SPEED_PX_PER_SECOND = 220;
 const LABEL_LIMIT = 12;
+const WORLD_PADDING = 24;
+const ROOM_BACKGROUND = "#ffe9ee";
+const ROOM_STRIPE = "#ffdce5";
+const STRIPE_WIDTH = 20;
+const STRIPE_SPACING = 72;
 
 function displayLabel(name: string): string {
   const trimmed = name.trim() || "Helper";
   if (trimmed.length <= LABEL_LIMIT) return trimmed;
   return `${trimmed.slice(0, Math.max(0, LABEL_LIMIT - 1))}-`;
+}
+
+function darkenColor(color: number): number {
+  const darken = (channel: number) => Math.round(channel * 0.74);
+  return (darken((color >> 16) & 255) << 16) |
+    (darken((color >> 8) & 255) << 8) |
+    darken(color & 255);
+}
+
+function drawPlayerBody(
+  body: import("pixi.js").Graphics,
+  color: number,
+) {
+  const borderColor = darkenColor(color);
+  const innerSize = PLAYER_SIZE - PLAYER_BORDER_SIZE * 2;
+  body.clear()
+    .rect(-PLAYER_SIZE / 2, -PLAYER_SIZE / 2, PLAYER_SIZE, PLAYER_SIZE)
+    .fill(borderColor)
+    .rect(-innerSize / 2, -innerSize / 2, innerSize, innerSize)
+    .fill(color);
 }
 
 function getSpawnPoint(
@@ -72,7 +99,7 @@ export function VillagePixiWorld(
       await app.init({
         antialias: true,
         autoDensity: true,
-        background: "#fff7fb",
+        background: ROOM_BACKGROUND,
         resizeTo: window,
       });
 
@@ -93,19 +120,50 @@ export function VillagePixiWorld(
         if (!app || !background) return;
         const width = app.renderer.width;
         const height = app.renderer.height;
-        const spawnSize = Math.max(160, height * 0.5);
-        const spawnLeft = width / 2 - spawnSize / 2;
-        const spawnTop = height / 2 - spawnSize / 2;
 
         background.clear()
           .rect(0, 0, width, height)
-          .fill("#fff7fb")
-          .rect(24, 24, Math.max(0, width - 48), Math.max(0, height - 48))
-          .fill("#e9f7e6")
-          .rect(spawnLeft, spawnTop, spawnSize, spawnSize)
-          .fill({ color: "#fff4d7", alpha: 0.9 })
-          .rect(spawnLeft + 14, spawnTop + 14, spawnSize - 28, spawnSize - 28)
-          .fill({ color: "#eef6ff", alpha: 0.42 });
+          .fill("#ffffff")
+          .rect(
+            WORLD_PADDING,
+            WORLD_PADDING,
+            Math.max(0, width - WORLD_PADDING * 2),
+            Math.max(0, height - WORLD_PADDING * 2),
+          )
+          .fill(ROOM_BACKGROUND);
+
+        const worldLeft = WORLD_PADDING;
+        const worldTop = WORLD_PADDING;
+        const worldRight = width - WORLD_PADDING;
+        const worldBottom = height - WORLD_PADDING;
+        for (
+          let stripeX = worldLeft - height;
+          stripeX < worldRight;
+          stripeX += STRIPE_SPACING
+        ) {
+          background
+            .poly([
+              stripeX,
+              worldBottom,
+              stripeX + STRIPE_WIDTH,
+              worldBottom,
+              stripeX + height + STRIPE_WIDTH,
+              worldTop,
+              stripeX + height,
+              worldTop,
+            ])
+            .fill({ color: ROOM_STRIPE, alpha: 0.55 });
+        }
+
+        background
+          .rect(0, 0, width, WORLD_PADDING)
+          .fill("#ffffff")
+          .rect(0, height - WORLD_PADDING, width, WORLD_PADDING)
+          .fill("#ffffff")
+          .rect(0, 0, WORLD_PADDING, height)
+          .fill("#ffffff")
+          .rect(width - WORLD_PADDING, 0, WORLD_PADDING, height)
+          .fill("#ffffff");
       }
 
       function syncPlayers() {
@@ -126,6 +184,10 @@ export function VillagePixiWorld(
           const existing = renderedPlayersRef.current.get(player.id);
           if (existing) {
             existing.label.text = displayLabel(player.name);
+            if (existing.color !== player.color) {
+              existing.color = player.color;
+              drawPlayerBody(existing.body, player.color);
+            }
             return;
           }
 
@@ -135,9 +197,8 @@ export function VillagePixiWorld(
             app.renderer.width,
             app.renderer.height,
           );
-          const body = new Graphics()
-            .rect(-PLAYER_SIZE / 2, -PLAYER_SIZE / 2, PLAYER_SIZE, PLAYER_SIZE)
-            .fill(player.color);
+          const body = new Graphics();
+          drawPlayerBody(body, player.color);
           const label = new Text({
             text: displayLabel(player.name),
             style: {
@@ -153,6 +214,7 @@ export function VillagePixiWorld(
             id: player.id,
             body,
             label,
+            color: player.color,
             x: spawn.x,
             y: spawn.y,
           });
@@ -166,12 +228,12 @@ export function VillagePixiWorld(
         drawBackground();
         for (const rendered of renderedPlayersRef.current.values()) {
           rendered.x = Math.min(
-            Math.max(PLAYER_SIZE / 2, rendered.x),
-            app!.renderer.width - PLAYER_SIZE / 2,
+            Math.max(WORLD_PADDING + PLAYER_SIZE / 2, rendered.x),
+            app!.renderer.width - WORLD_PADDING - PLAYER_SIZE / 2,
           );
           rendered.y = Math.min(
-            Math.max(PLAYER_SIZE / 2 + 22, rendered.y),
-            app!.renderer.height - PLAYER_SIZE / 2,
+            Math.max(WORLD_PADDING + PLAYER_SIZE / 2, rendered.y),
+            app!.renderer.height - WORLD_PADDING - PLAYER_SIZE / 2,
           );
         }
       });
@@ -180,8 +242,10 @@ export function VillagePixiWorld(
         if (!app) return;
         syncPlayers();
         const deltaSeconds = ticker.deltaMS / 1000;
-        const maxX = app.renderer.width - PLAYER_SIZE / 2;
-        const maxY = app.renderer.height - PLAYER_SIZE / 2;
+        const minX = WORLD_PADDING + PLAYER_SIZE / 2;
+        const minY = WORLD_PADDING + PLAYER_SIZE / 2;
+        const maxX = app.renderer.width - WORLD_PADDING - PLAYER_SIZE / 2;
+        const maxY = app.renderer.height - WORLD_PADDING - PLAYER_SIZE / 2;
 
         for (const rendered of renderedPlayersRef.current.values()) {
           const input = inputsRef.current.get(rendered.id);
@@ -193,7 +257,7 @@ export function VillagePixiWorld(
 
           rendered.x = Math.min(
             Math.max(
-              PLAYER_SIZE / 2,
+              minX,
               rendered.x +
                 normalizedX * PLAYER_SPEED_PX_PER_SECOND * deltaSeconds,
             ),
@@ -201,7 +265,7 @@ export function VillagePixiWorld(
           );
           rendered.y = Math.min(
             Math.max(
-              PLAYER_SIZE / 2 + 22,
+              minY,
               rendered.y +
                 normalizedY * PLAYER_SPEED_PX_PER_SECOND * deltaSeconds,
             ),
@@ -230,7 +294,7 @@ export function VillagePixiWorld(
   return (
     <div
       ref={containerRef}
-      class="fixed inset-0 overflow-hidden bg-[#fff7fb]"
+      class="fixed inset-0 overflow-hidden bg-[#ffe9ee]"
     />
   );
 }
