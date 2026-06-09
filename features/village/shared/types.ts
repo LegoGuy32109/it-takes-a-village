@@ -37,7 +37,28 @@ export interface SetNameEvent {
   name: string;
 }
 
-export type ControllerEvent = ControllerHelloEvent | SetNameEvent;
+export interface StartGameEvent {
+  type: "start_game";
+}
+
+export interface VillagePlayerInput {
+  x: number;
+  y: number;
+  action_pressed: boolean;
+  seq: number;
+  sentAt: number;
+}
+
+export interface PlayerInputEvent {
+  type: "input";
+  input: VillagePlayerInput;
+}
+
+export type ControllerEvent =
+  | ControllerHelloEvent
+  | SetNameEvent
+  | StartGameEvent
+  | PlayerInputEvent;
 
 export interface ControllerEnvelope {
   kind: "controller_event";
@@ -48,6 +69,20 @@ export interface SnapshotEnvelope {
   kind: "snapshot";
   snapshot: VillageSnapshot;
 }
+
+export interface GameStartedPlayer {
+  id: string;
+  name: string;
+  color: number;
+}
+
+export interface GameStartedEnvelope {
+  kind: "game_started";
+  players: GameStartedPlayer[];
+  viewerParticipantId: string | null;
+}
+
+export type DisplayEnvelope = SnapshotEnvelope | GameStartedEnvelope;
 
 export interface SignalPeerInfo {
   clientId: string;

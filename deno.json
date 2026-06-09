@@ -5,6 +5,7 @@
     "dev": "vite",
     "build": "vite build",
     "start": "deno serve -A _fresh/server.js",
+    "tunnel": "deno task build && deno serve --tunnel -A _fresh/server.js",
     "update": "deno run -A -r jsr:@fresh/update ."
   },
   "lint": {
@@ -24,6 +25,7 @@
     "preact": "npm:preact@^10.29.1",
     "@preact/signals": "npm:@preact/signals@^2.9.0",
     "@libs/qrcode": "jsr:@libs/qrcode@^3.0.1",
+    "pixi.js": "npm:pixi.js@^8.6.6",
     "@fresh/plugin-vite": "jsr:@fresh/plugin-vite@^1.1.2",
     "vite": "npm:vite@^7.1.3",
     "@types/babel__core": "npm:@types/babel__core@^7.20.5",
