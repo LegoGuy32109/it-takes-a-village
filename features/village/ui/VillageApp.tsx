@@ -1,5 +1,7 @@
 import { qrcode } from "@libs/qrcode";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { VillageController } from "../game/VillageController.tsx";
+import { VillagePixiWorld } from "../game/VillagePixiWorld.tsx";
 import {
   buildVillageSnapshot,
   createVillageState,
@@ -8,10 +10,14 @@ import {
 import {
   ControllerEnvelope,
   ControllerRole,
+  DisplayEnvelope,
+  GameStartedEnvelope,
+  GameStartedPlayer,
   SignalClientMessage,
   SignalServerMessage,
   SnapshotEnvelope,
   VillageClientRole,
+  VillagePlayerInput,
   VillageSnapshot,
   VillageState,
 } from "../shared/types.ts";
@@ -23,6 +29,16 @@ interface VillageAppProps {
 
 const PARTICIPANT_ID_STORAGE_KEY = "village:participant-id";
 const PARTICIPANT_NAME_STORAGE_KEY = "village:participant-name";
+const PLAYER_COLORS = [
+  0xf3a7c8,
+  0x9ec5fe,
+  0xb8d8c0,
+  0xffd166,
+  0xcdb4db,
+  0xffaf87,
+  0xa7f3d0,
+  0xfbcfe8,
+];
 
 function createSessionId(): string {
   return crypto.randomUUID().split("-")[0];
@@ -142,9 +158,25 @@ function displayName(name: string, fallback: string) {
   return trimName(name) || fallback;
 }
 
+function displayGameName(name: string): string {
+  const trimmed = displayName(name, "Helper");
+  if (trimmed.length <= 12) return trimmed;
+  return `${trimmed.slice(0, 11)}-`;
+}
+
+function colorForParticipant(participantId: string): number {
+  let hash = 0;
+  for (let index = 0; index < participantId.length; index += 1) {
+    hash = (hash * 31 + participantId.charCodeAt(index)) >>> 0;
+  }
+  return PLAYER_COLORS[hash % PLAYER_COLORS.length];
+}
+
 function shortId(value: string | null | undefined): string {
   if (!value) return "";
-  return value.length <= 8 ? value : `${value.slice(0, 4)}...${value.slice(-4)}`;
+  return value.length <= 8
+    ? value
+    : `${value.slice(0, 4)}...${value.slice(-4)}`;
 }
 
 function signalPayloadKind(
@@ -196,9 +228,15 @@ export default function VillageApp(
   >(null);
   const [resolvedRole, setResolvedRole] = useState<ControllerRole | null>(null);
   const [connectAttempt, setConnectAttempt] = useState(0);
+  const [gamePhase, setGamePhase] = useState<"lobby" | "playing">("lobby");
+  const [gamePlayers, setGamePlayers] = useState<GameStartedPlayer[]>([]);
 
   const clientIdRef = useRef(createClientId());
+  const participantNameRef = useRef("");
   const resolvedRoleRef = useRef<ControllerRole | null>(null);
+  const gamePhaseRef = useRef<"lobby" | "playing">("lobby");
+  const gamePlayersRef = useRef<GameStartedPlayer[]>([]);
+  const gameInputsRef = useRef(new Map<string, VillagePlayerInput>());
   const signalSocketRef = useRef<WebSocket | null>(null);
   const peerConnectionsRef = useRef(new Map<string, RTCPeerConnection>());
   const peerChannelsRef = useRef(new Map<string, RTCDataChannel>());
@@ -210,6 +248,7 @@ export default function VillageApp(
   );
   const gameStateRef = useRef(displayState);
   const reconnectTimerRef = useRef<number | null>(null);
+  const isDisplayMode = mode === "display";
 
   function debugLog(event: string, fields: Record<string, unknown> = {}) {
     const payload = {
@@ -267,6 +306,25 @@ export default function VillageApp(
   }, [resolvedRole]);
 
   useEffect(() => {
+    participantNameRef.current = participantName;
+  }, [participantName]);
+
+  useEffect(() => {
+    gamePhaseRef.current = gamePhase;
+  }, [gamePhase]);
+
+  useEffect(() => {
+    gamePlayersRef.current = gamePlayers;
+  }, [gamePlayers]);
+
+  useEffect(() => {
+    if (!booted || !isDisplayMode || gamePhase !== "lobby") return;
+    import("pixi.js")
+      .then(() => debugLog("pixi_preload_complete"))
+      .catch(() => debugLog("pixi_preload_failed"));
+  }, [booted, gamePhase, isDisplayMode]);
+
+  useEffect(() => {
     if (!booted) return;
     writeStoredValue(PARTICIPANT_NAME_STORAGE_KEY, participantName);
   }, [booted, participantName]);
@@ -284,7 +342,6 @@ export default function VillageApp(
     };
   }, []);
 
-  const isDisplayMode = mode === "display";
   const displaySnapshot = useMemo(
     () => buildVillageSnapshot(displayState, null),
     [displayState],
@@ -343,11 +400,33 @@ export default function VillageApp(
         sentCount += 1;
       }
     }
-    debugLog("controller_envelope_send", {
-      eventType: envelope.event.type,
-      sentCount,
-      channelCount: peerChannelsRef.current.size,
-    });
+    if (envelope.event.type !== "input") {
+      debugLog("controller_envelope_send", {
+        eventType: envelope.event.type,
+        sentCount,
+        channelCount: peerChannelsRef.current.size,
+      });
+    }
+  }
+
+  function sendDisplayEnvelope(peerId: string, envelope: DisplayEnvelope) {
+    const channel = peerChannelsRef.current.get(peerId);
+    if (!channel || channel.readyState !== "open") return;
+    channel.send(JSON.stringify(envelope));
+  }
+
+  function broadcastGameStarted(playersForGame: GameStartedPlayer[]) {
+    for (const [peerId, channel] of peerChannelsRef.current.entries()) {
+      if (channel.readyState !== "open") continue;
+      const viewerParticipantId = peerParticipantIdsRef.current.get(peerId) ??
+        null;
+      const payload: GameStartedEnvelope = {
+        kind: "game_started",
+        players: playersForGame,
+        viewerParticipantId,
+      };
+      channel.send(JSON.stringify(payload));
+    }
   }
 
   function sendSnapshotToControllers(state: VillageState) {
@@ -361,6 +440,32 @@ export default function VillageApp(
       };
       channel.send(JSON.stringify(payload));
     }
+  }
+
+  function startGameFromDisplay() {
+    const currentState = gameStateRef.current;
+    const existingPlayers = new Map(
+      gamePlayersRef.current.map((player) => [player.id, player]),
+    );
+    const eligibleParticipants = currentState.participants.filter((
+      participant,
+    ) => participant.connected && trimName(participant.name));
+    const playersForGame = eligibleParticipants.map((participant) =>
+      existingPlayers.get(participant.id) ?? {
+        id: participant.id,
+        name: displayGameName(participant.name),
+        color: colorForParticipant(participant.id),
+      }
+    );
+
+    debugLog("game_start", {
+      playerCount: playersForGame.length,
+      participantIds: playersForGame.map((player) => shortId(player.id)),
+    });
+    gamePlayersRef.current = playersForGame;
+    setGamePlayers(playersForGame);
+    setGamePhase("playing");
+    broadcastGameStarted(playersForGame);
   }
 
   function commitDisplayEvent(event: Parameters<typeof reduceVillageState>[1]) {
@@ -435,7 +540,7 @@ export default function VillageApp(
             event: {
               type: "hello",
               participantId,
-              name: trimName(participantName),
+              name: trimName(participantNameRef.current),
               role: resolvedRoleRef.current ?? "player",
             },
           } satisfies ControllerEnvelope,
@@ -459,14 +564,18 @@ export default function VillageApp(
       try {
         const payload = JSON.parse(String(event.data)) as
           | ControllerEnvelope
-          | SnapshotEnvelope;
-        debugLog("datachannel_message", {
-          peerId: shortId(peerId),
-          kind: payload.kind,
-          eventType: payload.kind === "controller_event"
-            ? payload.event.type
-            : undefined,
-        });
+          | DisplayEnvelope;
+        if (
+          payload.kind !== "controller_event" || payload.event.type !== "input"
+        ) {
+          debugLog("datachannel_message", {
+            peerId: shortId(peerId),
+            kind: payload.kind,
+            eventType: payload.kind === "controller_event"
+              ? payload.event.type
+              : undefined,
+          });
+        }
 
         if (isDisplayMode) {
           if (payload.kind !== "controller_event") return;
@@ -495,6 +604,13 @@ export default function VillageApp(
               name: payload.event.name,
               role: assignedRole,
             });
+            if (gamePhaseRef.current === "playing") {
+              sendDisplayEnvelope(peerId, {
+                kind: "game_started",
+                players: gamePlayersRef.current,
+                viewerParticipantId: payload.event.participantId,
+              });
+            }
             return;
           }
 
@@ -502,6 +618,25 @@ export default function VillageApp(
             peerId,
           );
           if (!participantIdFromPeer) return;
+          if (payload.event.type === "start_game") {
+            if (
+              participantIdFromPeer === gameStateRef.current.hostParticipantId
+            ) {
+              startGameFromDisplay();
+            } else {
+              debugLog("game_start_rejected_non_host", {
+                participantId: shortId(participantIdFromPeer),
+              });
+            }
+            return;
+          }
+          if (payload.event.type === "input") {
+            gameInputsRef.current.set(
+              participantIdFromPeer,
+              payload.event.input,
+            );
+            return;
+          }
           commitDisplayEvent({
             type: "controller_event",
             participantId: participantIdFromPeer,
@@ -510,8 +645,14 @@ export default function VillageApp(
           return;
         }
 
-        if (payload.kind !== "snapshot") return;
-        setControllerSnapshot(payload.snapshot);
+        if (payload.kind === "snapshot") {
+          setControllerSnapshot(payload.snapshot);
+          return;
+        }
+        if (payload.kind === "game_started") {
+          setGamePlayers(payload.players);
+          setGamePhase("playing");
+        }
       } catch {
         debugLog("datachannel_message_malformed", { peerId: shortId(peerId) });
         setTransportError("Received malformed realtime data.");
@@ -994,11 +1135,36 @@ export default function VillageApp(
     }
   }
 
+  function handleHostStart() {
+    debugLog("host_start_pressed", {
+      hasSnapshot: Boolean(controllerSnapshot),
+      isHost: Boolean(controllerSnapshot?.isHost),
+      hasName: Boolean(trimName(participantName)),
+    });
+    sendControllerEnvelope({
+      kind: "controller_event",
+      event: { type: "start_game" },
+    });
+  }
+
+  function sendGameInput(input: VillagePlayerInput) {
+    sendControllerEnvelope({
+      kind: "controller_event",
+      event: { type: "input", input },
+    });
+  }
+
   if (!booted) {
     return <div class="min-h-screen bg-[#fff7fb]" />;
   }
 
   if (isDisplayMode) {
+    if (gamePhase === "playing") {
+      return (
+        <VillagePixiWorld players={gamePlayers} inputsRef={gameInputsRef} />
+      );
+    }
+
     return (
       <main class="min-h-screen bg-[#fff7fb] text-[#514158]">
         <div class="mx-auto flex min-h-screen max-w-7xl flex-col gap-6 px-5 py-6">
@@ -1122,6 +1288,26 @@ export default function VillageApp(
   const snapshotName = controllerSnapshot?.participants.find((participant) =>
     participant.id === controllerSnapshot.viewerParticipantId
   )?.name;
+  const controllerDisplayName = displayName(
+    snapshotName ?? participantName,
+    resolvedRole === "host" ? "Host helper" : "Tiny helper",
+  );
+  const openControllerChannelCount = [...peerChannelsRef.current.values()]
+    .filter((channel) => channel.readyState === "open").length;
+  const canHostStart = resolvedRole === "host" &&
+    Boolean(controllerSnapshot?.isHost) &&
+    Boolean(trimName(participantName)) &&
+    openControllerChannelCount > 0;
+
+  if (gamePhase === "playing") {
+    return (
+      <VillageController
+        name={displayGameName(controllerDisplayName)}
+        signalStatus={signalStatus}
+        onInput={sendGameInput}
+      />
+    );
+  }
 
   return (
     <main class="min-h-screen bg-[#fdf4ff] px-4 py-6 text-[#514158]">
@@ -1171,12 +1357,17 @@ export default function VillageApp(
               Room Controls
             </p>
             <p class="mt-3 text-2xl font-black text-[#52627d]">
-              {displayName(snapshotName ?? participantName, "Host helper")}
+              {controllerDisplayName}
             </p>
             <button
               type="button"
-              disabled
-              class="mt-5 h-16 w-full cursor-not-allowed rounded-2xl bg-[#d7e6f8] text-xl font-black text-[#8394ad]"
+              disabled={!canHostStart}
+              onClick={handleHostStart}
+              class={`mt-5 h-16 w-full rounded-2xl text-xl font-black transition ${
+                canHostStart
+                  ? "bg-[#9ec5fe] text-[#384b68] hover:bg-[#8ab6ef]"
+                  : "cursor-not-allowed bg-[#d7e6f8] text-[#8394ad]"
+              }`}
             >
               Start Game
             </button>
@@ -1189,7 +1380,7 @@ export default function VillageApp(
               Ready helper
             </p>
             <p class="mt-4 text-3xl font-black text-[#806230]">
-              {displayName(snapshotName ?? participantName, "Tiny helper")}
+              {controllerDisplayName}
             </p>
             <p class="mt-4 text-lg font-semibold text-[#7b6b4d]">
               Waiting for host to start...

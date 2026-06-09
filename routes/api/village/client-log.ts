@@ -33,4 +33,3 @@ export const handler = define.handlers({
     return new Response(null, { status: 204 });
   },
 });
-
