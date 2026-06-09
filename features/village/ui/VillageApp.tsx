@@ -1219,8 +1219,17 @@ export default function VillageApp(
 
   if (isDisplayMode) {
     if (gamePhase === "playing") {
+      const connectedPlayerIds = new Set(
+        displayState.participants
+          .filter((participant) => participant.connected)
+          .map((participant) => participant.id),
+      );
       return (
-        <VillagePixiWorld players={gamePlayers} inputsRef={gameInputsRef} />
+        <VillagePixiWorld
+          players={gamePlayers}
+          connectedPlayerIds={connectedPlayerIds}
+          inputsRef={gameInputsRef}
+        />
       );
     }
 
