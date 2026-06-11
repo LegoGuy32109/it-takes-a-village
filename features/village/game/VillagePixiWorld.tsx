@@ -15,6 +15,7 @@ interface VillagePixiWorldProps {
 interface RenderedPlayer {
   id: string;
   body: import("pixi.js").Graphics;
+  cooldownOverlay: import("pixi.js").Graphics;
   attackOverlay: import("pixi.js").Graphics;
   label: import("pixi.js").Text;
   scoreLabel: import("pixi.js").Text;
@@ -74,6 +75,7 @@ const WALL_MOMENTUM_EXTENSION_MS = 450;
 const PLAYER_COLLISION_MOMENTUM_EXTENSION_MS = 250;
 const BUMP_VISUAL_HIT_WINDOW_MS = 100;
 const BUMP_VISUAL_FADE_MS = 150;
+const BUMP_COOLDOWN_BAR_ALPHA = 0.16;
 const LABEL_LIMIT = 12;
 const WINNING_SCORE = 1000;
 const CORRECT_POINTS_PER_SECOND = 20;
@@ -473,6 +475,28 @@ function drawPlayerBody(
     .fill(borderColor)
     .rect(-innerSize / 2, -innerSize / 2, innerSize, innerSize)
     .fill(color);
+}
+
+function drawCooldownOverlay(
+  graphics: import("pixi.js").Graphics,
+  remainingRatio: number,
+) {
+  graphics.clear();
+  if (remainingRatio <= 0) {
+    graphics.visible = false;
+    return;
+  }
+
+  graphics.visible = true;
+  graphics.alpha = 1;
+  const clampedRatio = clamp(remainingRatio, 0, 1);
+  const barHeight = Math.max(1, PLAYER_SIZE * clampedRatio);
+  const barX = -PLAYER_SIZE / 2;
+  const barY = PLAYER_SIZE / 2 - barHeight;
+
+  graphics
+    .rect(barX, barY, PLAYER_SIZE, barHeight)
+    .fill({ color: 0x303030, alpha: BUMP_COOLDOWN_BAR_ALPHA });
 }
 
 function drawAttackOverlay(
@@ -1060,6 +1084,20 @@ export function VillagePixiWorld(
           player.attackOverlay.alpha = clamp(alpha, 0, 1);
         }
 
+        function refreshCooldownOverlay(player: RenderedPlayer, nowMs: number) {
+          if (nowMs >= player.nextBumpAtMs) {
+            drawCooldownOverlay(player.cooldownOverlay, 0);
+            return;
+          }
+
+          const remainingRatio = clamp(
+            (player.nextBumpAtMs - nowMs) / BUMP_COOLDOWN_MS,
+            0,
+            1,
+          );
+          drawCooldownOverlay(player.cooldownOverlay, remainingRatio);
+        }
+
         function beginBumpAttack(player: RenderedPlayer, nowMs: number) {
           if (nowMs < player.nextBumpAtMs) return;
 
@@ -1329,11 +1367,13 @@ export function VillagePixiWorld(
             if (currentIds.has(playerId)) continue;
             activePlayerLayer.removeChild(
               rendered.body,
+              rendered.cooldownOverlay,
               rendered.attackOverlay,
               rendered.label,
               rendered.scoreLabel,
             );
             rendered.body.destroy();
+            rendered.cooldownOverlay.destroy();
             rendered.attackOverlay.destroy();
             rendered.label.destroy();
             rendered.scoreLabel.destroy();
@@ -1348,6 +1388,7 @@ export function VillagePixiWorld(
               if (existing.color !== player.color) {
                 existing.color = player.color;
                 drawPlayerBody(existing.body, player.color);
+                drawCooldownOverlay(existing.cooldownOverlay, 0);
                 drawAttackOverlay(existing.attackOverlay, player.color, 0);
               }
               existing.isDebug = Boolean(player.isDebug);
@@ -1362,6 +1403,8 @@ export function VillagePixiWorld(
             );
             const body = new Graphics();
             drawPlayerBody(body, player.color);
+            const cooldownOverlay = new Graphics();
+            drawCooldownOverlay(cooldownOverlay, 0);
             const attackOverlay = new Graphics();
             drawAttackOverlay(attackOverlay, player.color, 0);
             const label = new Text({
@@ -1384,10 +1427,17 @@ export function VillagePixiWorld(
               },
             });
             scoreLabel.anchor.set(0.5, 0);
-            activePlayerLayer.addChild(body, attackOverlay, label, scoreLabel);
+            activePlayerLayer.addChild(
+              body,
+              cooldownOverlay,
+              attackOverlay,
+              label,
+              scoreLabel,
+            );
             renderedPlayersRef.current.set(player.id, {
               id: player.id,
               body,
+              cooldownOverlay,
               attackOverlay,
               label,
               scoreLabel,
@@ -1413,6 +1463,8 @@ export function VillagePixiWorld(
           for (const rendered of renderedPlayersRef.current.values()) {
             rendered.body.x = rendered.x;
             rendered.body.y = rendered.y;
+            rendered.cooldownOverlay.x = rendered.x;
+            rendered.cooldownOverlay.y = rendered.y;
             rendered.attackOverlay.x = rendered.x;
             rendered.attackOverlay.y = rendered.y;
             rendered.label.x = rendered.x;
@@ -1420,6 +1472,7 @@ export function VillagePixiWorld(
             rendered.scoreLabel.x = rendered.x;
             rendered.scoreLabel.y = rendered.y + PLAYER_SIZE / 2 + 5;
             refreshAttackOverlay(rendered, nowMs);
+            refreshCooldownOverlay(rendered, nowMs);
           }
         }
 
@@ -1460,6 +1513,8 @@ export function VillagePixiWorld(
           for (const rendered of renderedPlayersRef.current.values()) {
             rendered.body.x = rendered.x;
             rendered.body.y = rendered.y;
+            rendered.cooldownOverlay.x = rendered.x;
+            rendered.cooldownOverlay.y = rendered.y;
             rendered.attackOverlay.x = rendered.x;
             rendered.attackOverlay.y = rendered.y;
             rendered.label.x = rendered.x;
@@ -1470,6 +1525,7 @@ export function VillagePixiWorld(
               rendered.scoreLabel.style.fill = "#514158";
             }
             refreshAttackOverlay(rendered, nowMs);
+            refreshCooldownOverlay(rendered, nowMs);
             scorePlayer(rendered, deltaSeconds);
           }
         });
@@ -1480,6 +1536,7 @@ export function VillagePixiWorld(
       disposed = true;
       for (const rendered of renderedPlayersRef.current.values()) {
         rendered.body.destroy();
+        rendered.cooldownOverlay.destroy();
         rendered.attackOverlay.destroy();
         rendered.label.destroy();
         rendered.scoreLabel.destroy();
