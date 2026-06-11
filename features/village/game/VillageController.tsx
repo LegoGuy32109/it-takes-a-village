@@ -9,8 +9,7 @@ interface VillageControllerProps {
   onDisconnect: () => void;
 }
 
-const JOYSTICK_RADIUS = 74;
-const KNOB_RADIUS = 28;
+const KNOB_RADIUS_RATIO = 0.19;
 const SEND_INTERVAL_MS = 50;
 
 export function VillageController(
@@ -130,12 +129,13 @@ export function VillageController(
     const rawX = event.clientX - centerX;
     const rawY = event.clientY - centerY;
     const distance = Math.hypot(rawX, rawY);
-    const clampedDistance = Math.min(JOYSTICK_RADIUS - KNOB_RADIUS, distance);
+    const joystickRadius = Math.min(bounds.width, bounds.height) / 2;
+    const knobRadius = joystickRadius * KNOB_RADIUS_RATIO;
+    const clampedDistance = Math.min(joystickRadius - knobRadius, distance);
     const angle = Math.atan2(rawY, rawX);
     const knobX = distance > 0 ? Math.cos(angle) * clampedDistance : 0;
     const knobY = distance > 0 ? Math.sin(angle) * clampedDistance : 0;
-    const normalizedDistance = clampedDistance /
-      (JOYSTICK_RADIUS - KNOB_RADIUS);
+    const normalizedDistance = clampedDistance / (joystickRadius - knobRadius);
 
     latestVectorRef.current = {
       x: distance > 0 ? Math.cos(angle) * normalizedDistance : 0,
@@ -171,7 +171,7 @@ export function VillageController(
 
   return (
     <main class="fixed inset-0 h-[100dvh] w-screen select-none overflow-hidden bg-[#fff7fb] text-[#514158] [touch-action:none]">
-      <div class="fixed left-0 right-0 top-0 z-10 flex items-start justify-between gap-3 px-[max(1rem,env(safe-area-inset-left))] pb-3 pt-[max(0.75rem,env(safe-area-inset-top))]">
+      <div class="fixed left-0 right-0 top-0 z-10 flex items-start justify-between gap-2 px-[max(0.5rem,env(safe-area-inset-left))] pb-2 pt-[max(0.5rem,env(safe-area-inset-top))]">
         <div class="rounded-full border border-[#efd0ef] bg-white/85 px-4 py-2 text-center shadow-sm">
           <p class="text-sm font-black text-[#6d4d73]">{name || "Helper"}</p>
           <p class="text-xs font-semibold text-[#806d7b]">{signalStatus}</p>
@@ -197,8 +197,27 @@ export function VillageController(
         </button>
       </div>
 
+      <div class="pointer-events-none fixed left-1/2 top-[max(4.7rem,calc(env(safe-area-inset-top)+3.7rem))] z-10 hidden -translate-x-1/2 items-center gap-2 rounded-full border border-[#ffe1a8] bg-[#fff4d7]/95 px-4 py-2 text-sm font-black text-[#806230] shadow-sm portrait:flex landscape:hidden">
+        <svg
+          aria-hidden="true"
+          viewBox="0 0 24 24"
+          class="h-5 w-5"
+          fill="none"
+          stroke="currentColor"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          stroke-width="2.4"
+        >
+          <path d="M20 11a8 8 0 0 0-14.2-5" />
+          <path d="M6 2v4h4" />
+          <path d="M4 13a8 8 0 0 0 14.2 5" />
+          <path d="M18 22v-4h-4" />
+        </svg>
+        <span>playing horizontal recommended</span>
+      </div>
+
       <div class="absolute inset-0 grid h-[100dvh] grid-cols-2 landscape:grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)]">
-        <section class="flex items-end justify-center pb-[max(2.5rem,env(safe-area-inset-bottom))] pl-[max(1.25rem,env(safe-area-inset-left))] landscape:items-center landscape:pb-0">
+        <section class="flex items-end justify-center pb-[max(1rem,env(safe-area-inset-bottom))] pl-[max(0.5rem,env(safe-area-inset-left))] landscape:items-center landscape:pb-0">
           <div
             ref={joystickRef}
             onPointerDown={handleJoystickPointerDown}
@@ -206,11 +225,11 @@ export function VillageController(
             onPointerUp={releaseJoystick}
             onPointerCancel={releaseJoystick}
             onLostPointerCapture={releaseJoystick}
-            class="relative h-[148px] w-[148px] rounded-full border-4 border-[#cfe2ff] bg-[#eef6ff] shadow-lg [touch-action:none]"
+            class="relative h-[clamp(170px,44vw,220px)] w-[clamp(170px,44vw,220px)] rounded-full border-4 border-[#cfe2ff] bg-[#eef6ff] shadow-lg [touch-action:none]"
             aria-label="Movement joystick"
           >
             <div
-              class="absolute left-1/2 top-1/2 h-14 w-14 rounded-full border-4 border-[#9ebbe0] bg-[#d7e6f8] shadow"
+              class="absolute left-1/2 top-1/2 h-[38%] w-[38%] rounded-full border-4 border-[#9ebbe0] bg-[#d7e6f8] shadow"
               style={{
                 transform:
                   `translate(calc(-50% + ${knob.x}px), calc(-50% + ${knob.y}px))`,
@@ -219,7 +238,7 @@ export function VillageController(
           </div>
         </section>
 
-        <section class="flex items-end justify-center pb-[max(2.5rem,env(safe-area-inset-bottom))] pr-[max(1.25rem,env(safe-area-inset-right))] landscape:items-center landscape:pb-0">
+        <section class="flex items-end justify-center pb-[max(1rem,env(safe-area-inset-bottom))] pr-[max(0.5rem,env(safe-area-inset-right))] landscape:items-center landscape:pb-0">
           <button
             type="button"
             onPointerDown={(event) => {
@@ -245,7 +264,7 @@ export function VillageController(
               actionPointerIdRef.current = null;
               setAction(false);
             }}
-            class={`h-36 w-36 rounded-full border-4 text-2xl font-black shadow-lg [touch-action:none] ${
+            class={`h-[clamp(170px,44vw,220px)] w-[clamp(170px,44vw,220px)] rounded-full border-4 text-3xl font-black shadow-lg [touch-action:none] ${
               actionPressed
                 ? "border-[#dd9ab3] bg-[#f3ccd9] text-[#6d4d73]"
                 : "border-[#ffe1a8] bg-[#fff4d7] text-[#806230]"
