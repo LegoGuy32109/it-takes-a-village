@@ -40,6 +40,10 @@ export interface StartGameEvent {
   type: "start_game";
 }
 
+export interface LeavingEvent {
+  type: "leaving";
+}
+
 export interface VillagePlayerInput {
   x: number;
   y: number;
@@ -57,6 +61,7 @@ export type ControllerEvent =
   | ControllerHelloEvent
   | SetNameEvent
   | StartGameEvent
+  | LeavingEvent
   | PlayerInputEvent;
 
 export interface ControllerEnvelope {
@@ -64,15 +69,27 @@ export interface ControllerEnvelope {
   event: ControllerEvent;
 }
 
+export interface HealthPongEnvelope {
+  kind: "health_pong";
+  sentAt: number;
+  receivedAt: number;
+}
+
 export interface SnapshotEnvelope {
   kind: "snapshot";
   snapshot: VillageSnapshot;
+}
+
+export interface HealthPingEnvelope {
+  kind: "health_ping";
+  sentAt: number;
 }
 
 export interface GameStartedPlayer {
   id: string;
   name: string;
   color: number;
+  isDebug?: boolean;
 }
 
 export interface GameStartedEnvelope {
@@ -81,7 +98,32 @@ export interface GameStartedEnvelope {
   viewerParticipantId: string | null;
 }
 
-export type DisplayEnvelope = SnapshotEnvelope | GameStartedEnvelope;
+export interface LobbyReturnEnvelope {
+  kind: "lobby_return";
+  snapshot: VillageSnapshot;
+}
+
+export interface GameResultEnvelope {
+  kind: "game_result";
+  winnerParticipantId: string;
+  viewerWon: boolean;
+}
+
+export interface BumpHitEnvelope {
+  kind: "bump_hit";
+  hitCount: number;
+}
+
+export type DisplayEnvelope =
+  | SnapshotEnvelope
+  | GameStartedEnvelope
+  | LobbyReturnEnvelope
+  | GameResultEnvelope
+  | BumpHitEnvelope
+  | HealthPingEnvelope;
+export type ControllerRealtimeEnvelope =
+  | ControllerEnvelope
+  | HealthPongEnvelope;
 
 export interface SignalPeerInfo {
   clientId: string;
@@ -135,6 +177,10 @@ export type VillageEngineEvent =
   }
   | {
     type: "peer_disconnected";
+    participantId: string;
+  }
+  | {
+    type: "peer_removed";
     participantId: string;
   }
   | {

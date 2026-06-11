@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { VillagePlayerInput } from "../shared/types.ts";
+import { triggerLightTap } from "../shared/haptics.ts";
 
 interface VillageControllerProps {
   name: string;
   signalStatus: string;
   connectionDetail: string;
+  backgroundColor: string;
   onInput: (input: VillagePlayerInput) => void;
   onDisconnect: () => void;
 }
@@ -13,8 +15,14 @@ const KNOB_RADIUS_RATIO = 0.19;
 const SEND_INTERVAL_MS = 50;
 
 export function VillageController(
-  { name, signalStatus, connectionDetail, onInput, onDisconnect }:
-    VillageControllerProps,
+  {
+    name,
+    signalStatus,
+    connectionDetail,
+    backgroundColor,
+    onInput,
+    onDisconnect,
+  }: VillageControllerProps,
 ) {
   const joystickRef = useRef<HTMLDivElement | null>(null);
   const pointerIdRef = useRef<number | null>(null);
@@ -166,11 +174,17 @@ export function VillageController(
   function setAction(nextPressed: boolean) {
     actionPressedRef.current = nextPressed;
     setActionPressed(nextPressed);
+    if (nextPressed) {
+      triggerLightTap();
+    }
     emitInput(true);
   }
 
   return (
-    <main class="fixed inset-0 h-[100dvh] w-screen select-none overflow-hidden bg-[#fff7fb] text-[#514158] [touch-action:none]">
+    <main
+      class="fixed inset-0 h-[100dvh] w-screen select-none overflow-hidden text-[#514158] [touch-action:none]"
+      style={{ backgroundColor }}
+    >
       <div class="fixed left-0 right-0 top-0 z-10 flex items-start justify-between gap-2 px-[max(0.5rem,env(safe-area-inset-left))] pb-2 pt-[max(0.5rem,env(safe-area-inset-top))]">
         <div class="rounded-full border border-[#efd0ef] bg-white/85 px-4 py-2 text-center shadow-sm">
           <p class="text-sm font-black text-[#6d4d73]">{name || "Helper"}</p>
@@ -197,11 +211,11 @@ export function VillageController(
         </button>
       </div>
 
-      <div class="pointer-events-none fixed left-1/2 top-[max(4.7rem,calc(env(safe-area-inset-top)+3.7rem))] z-10 hidden -translate-x-1/2 items-center gap-2 rounded-full border border-[#ffe1a8] bg-[#fff4d7]/95 px-4 py-2 text-sm font-black text-[#806230] shadow-sm portrait:flex landscape:hidden">
+      <div class="pointer-events-none fixed left-1/2 top-1/2 z-10 hidden -translate-x-1/2 -translate-y-1/2 flex-col items-center gap-3 rounded-[1.5rem] border border-[#ffe1a8] bg-[#fff4d7]/95 px-7 py-6 text-center text-xl font-black text-[#806230] shadow-lg portrait:flex landscape:hidden">
         <svg
           aria-hidden="true"
           viewBox="0 0 24 24"
-          class="h-5 w-5"
+          class="h-12 w-12"
           fill="none"
           stroke="currentColor"
           stroke-linecap="round"

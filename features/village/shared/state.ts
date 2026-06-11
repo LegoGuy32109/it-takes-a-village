@@ -18,6 +18,35 @@ function trimName(name: string): string {
   return name.trim().slice(0, 30);
 }
 
+function assignHost(
+  participants: VillageParticipant[],
+  preferredHostParticipantId: string | null,
+): {
+  participants: VillageParticipant[];
+  hostParticipantId: string | null;
+} {
+  const preferredHost = preferredHostParticipantId
+    ? participants.find((participant) =>
+      participant.id === preferredHostParticipantId && participant.connected
+    ) ?? null
+    : null;
+  const host = preferredHost ?? participants
+    .filter((participant) => participant.connected)
+    .sort((left, right) => left.joinedOrder - right.joinedOrder)[0] ??
+    null;
+  const hostParticipantId = host?.id ?? null;
+
+  return {
+    participants: participants.map((participant) => ({
+      ...participant,
+      role: participant.connected && participant.id === hostParticipantId
+        ? "host"
+        : "player",
+    })),
+    hostParticipantId,
+  };
+}
+
 export function createVillageState(
   sessionId: string,
   joinCode: string,
@@ -48,7 +77,7 @@ export function reduceVillageState(
           ...nextParticipants[participantIndex],
           connected: true,
           name: name || nextParticipants[participantIndex].name,
-          role: event.role,
+          role: "player",
         };
       } else {
         nextParticipants.push({
@@ -56,16 +85,15 @@ export function reduceVillageState(
           name,
           connected: true,
           joinedOrder: state.participants.length,
-          role: event.role,
+          role: "player",
         });
       }
 
+      const assignment = assignHost(nextParticipants, state.hostParticipantId);
       return {
         ...state,
-        participants: nextParticipants,
-        hostParticipantId: event.role === "host"
-          ? event.participantId
-          : state.hostParticipantId,
+        participants: assignment.participants,
+        hostParticipantId: assignment.hostParticipantId,
       };
     }
     case "peer_disconnected": {
@@ -81,9 +109,24 @@ export function reduceVillageState(
         connected: false,
       };
 
+      const assignment = assignHost(nextParticipants, state.hostParticipantId);
       return {
         ...state,
-        participants: nextParticipants,
+        participants: assignment.participants,
+        hostParticipantId: assignment.hostParticipantId,
+      };
+    }
+    case "peer_removed": {
+      const nextParticipants = state.participants.filter((participant) =>
+        participant.id !== event.participantId
+      );
+      if (nextParticipants.length === state.participants.length) return state;
+
+      const assignment = assignHost(nextParticipants, state.hostParticipantId);
+      return {
+        ...state,
+        participants: assignment.participants,
+        hostParticipantId: assignment.hostParticipantId,
       };
     }
     case "controller_event": {

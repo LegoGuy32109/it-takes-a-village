@@ -48,7 +48,8 @@
     "npm:rollup@^4.55.1": "4.60.4",
     "npm:tailwindcss@^4.1.10": "4.3.0",
     "npm:vite@^7.1.3": "7.3.3",
-    "npm:vite@^7.1.4": "7.3.3"
+    "npm:vite@^7.1.4": "7.3.3",
+    "npm:web-haptics@0.0.6": "0.0.6"
   },
   "jsr": {
     "@deno/esbuild-plugin@1.2.1": {
@@ -1515,6 +1516,9 @@
       ],
       "bin": true
     },
+    "web-haptics@0.0.6": {
+      "integrity": "sha512-eCzcf1LDi20+Fr0x9V3OkX92k0gxEQXaHajmhXHitsnk6SxPeshv8TBtBRqxyst8HI1uf2FyFVE7QS3jo1gkrw=="
+    },
     "yallist@3.1.1": {
       "integrity": "sha512-a4UGQaWPH59mOXUYnAG2ewncQS4i4F43Tv3JoAM+s2VDAmS9NsK8GpDMLrCHPksFT7h3K6TOoUNn2pb7RoXx4g=="
     }
@@ -1530,7 +1534,8 @@
       "npm:pixi.js@^8.6.6",
       "npm:preact@^10.29.1",
       "npm:tailwindcss@^4.1.10",
-      "npm:vite@^7.1.3"
+      "npm:vite@^7.1.3",
+      "npm:web-haptics@0.0.6"
     ]
   }
 }

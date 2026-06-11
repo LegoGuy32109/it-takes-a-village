@@ -1,7 +1,18 @@
 import { qrcode } from "@libs/qrcode";
-import { useEffect, useMemo, useRef, useState } from "preact/hooks";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "preact/hooks";
 import { VillageController } from "../game/VillageController.tsx";
 import { VillagePixiWorld } from "../game/VillagePixiWorld.tsx";
+import {
+  triggerErrorBuzz,
+  triggerShortBuzz,
+  triggerStrongBuzz,
+} from "../shared/haptics.ts";
 import {
   buildVillageSnapshot,
   createVillageState,
@@ -9,10 +20,12 @@ import {
 } from "../shared/state.ts";
 import {
   ControllerEnvelope,
+  ControllerRealtimeEnvelope,
   ControllerRole,
   DisplayEnvelope,
   GameStartedEnvelope,
   GameStartedPlayer,
+  LobbyReturnEnvelope,
   SignalClientMessage,
   SignalServerMessage,
   SnapshotEnvelope,
@@ -36,8 +49,11 @@ const PLAYER_COLORS = [
   0xd6fbe4,
   0xfcfdcd,
 ];
+const DEBUG_BOT_COUNT = 5;
 const PEER_DISCONNECT_GRACE_MS = 5000;
 const TRANSIENT_ERROR_VISIBILITY_MS = 2500;
+const HEALTH_PING_INTERVAL_MS = 2500;
+const HEALTH_TIMEOUT_MS = 60_000;
 
 function createSessionId(): string {
   return crypto.randomUUID().split("-")[0];
@@ -197,11 +213,15 @@ function colorForParticipant(participantId: string): number {
   return shiftColorBrightness(baseColor, brightness);
 }
 
-function createRandomPlayerColor(): number {
-  const baseColor =
-    PLAYER_COLORS[Math.floor(Math.random() * PLAYER_COLORS.length)];
-  const brightness = (Math.random() - 0.5) * 0.22;
+function colorForDebugBot(index: number): number {
+  const seed = hashString(`debug-bot-${index + 1}`);
+  const baseColor = PLAYER_COLORS[(seed + index) % PLAYER_COLORS.length];
+  const brightness = (seededUnit(seed ^ 0x51f4d3) - 0.5) * 0.1;
   return shiftColorBrightness(baseColor, brightness);
+}
+
+function cssColorFromNumber(color: number): string {
+  return `#${color.toString(16).padStart(6, "0")}`;
 }
 
 function shortId(value: string | null | undefined): string {
@@ -224,6 +244,20 @@ function signalPayloadKind(
   const protocol = candidate.candidate.match(/ udp | tcp /)?.[0]?.trim() ??
     "unknown";
   return `ice:${candidateType}:${protocol}`;
+}
+
+function createDebugPracticePlayers(
+  existingPlayers: Map<string, GameStartedPlayer>,
+): GameStartedPlayer[] {
+  return Array.from({ length: DEBUG_BOT_COUNT }, (_, index) => {
+    const id = `debug-bot-${index + 1}`;
+    return existingPlayers.get(id) ?? {
+      id,
+      name: `Practice Bot ${index + 1}`,
+      color: colorForDebugBot(index),
+      isDebug: true,
+    };
+  });
 }
 
 const PLACEHOLDER_DISPLAY_STATE = createVillageState(
@@ -270,7 +304,6 @@ export default function VillageApp(
   const gamePhaseRef = useRef<"lobby" | "playing">("lobby");
   const gamePlayersRef = useRef<GameStartedPlayer[]>([]);
   const gameInputsRef = useRef(new Map<string, VillagePlayerInput>());
-  const actionPressedRef = useRef(new Map<string, boolean>());
   const signalSocketRef = useRef<WebSocket | null>(null);
   const peerConnectionsRef = useRef(new Map<string, RTCPeerConnection>());
   const peerChannelsRef = useRef(new Map<string, RTCDataChannel>());
@@ -283,11 +316,30 @@ export default function VillageApp(
   const gameStateRef = useRef(displayState);
   const reconnectTimerRef = useRef<number | null>(null);
   const peerDisconnectTimersRef = useRef(new Map<string, number>());
+  const peerLastPongRef = useRef(new Map<string, number>());
+  const healthTimerRef = useRef<number | null>(null);
   const transportErrorTimerRef = useRef<number | null>(null);
   const connectionEpochRef = useRef(0);
   const isDisplayMode = mode === "display";
 
+  function shouldLogClientEvent(
+    event: string,
+    fields: Record<string, unknown>,
+  ): boolean {
+    const searchableText = [
+      event,
+      ...Object.values(fields).filter((value): value is string =>
+        typeof value === "string"
+      ),
+    ].join(" ");
+    return /error|fail|malformed|rejected|timeout|skipped/i.test(
+      searchableText,
+    );
+  }
+
   function debugLog(event: string, fields: Record<string, unknown> = {}) {
+    if (!shouldLogClientEvent(event, fields)) return;
+
     const payload = {
       event,
       mode,
@@ -367,6 +419,56 @@ export default function VillageApp(
   }, [booted, participantName]);
 
   useEffect(() => {
+    if (!booted || !isDisplayMode) return;
+
+    if (healthTimerRef.current !== null) {
+      globalThis.clearInterval(healthTimerRef.current);
+    }
+
+    healthTimerRef.current = globalThis.setInterval(() => {
+      const now = Date.now();
+      for (const [peerId, channel] of peerChannelsRef.current.entries()) {
+        const participantId = peerParticipantIdsRef.current.get(peerId);
+        const lastPong = peerLastPongRef.current.get(peerId) ?? now;
+
+        if (participantId && now - lastPong > HEALTH_TIMEOUT_MS) {
+          debugLog("peer_health_timeout", {
+            peerId: shortId(peerId),
+            participantId: shortId(participantId),
+            ageMs: now - lastPong,
+          });
+          cleanupPeer(peerId, { removeParticipant: true });
+          continue;
+        }
+
+        if (channel.readyState !== "open") continue;
+        try {
+          channel.send(JSON.stringify(
+            {
+              kind: "health_ping",
+              sentAt: now,
+            } satisfies DisplayEnvelope,
+          ));
+        } catch (error) {
+          debugLog("peer_health_ping_failed", {
+            peerId: shortId(peerId),
+            participantId: participantId ? shortId(participantId) : undefined,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          if (participantId) cleanupPeer(peerId);
+        }
+      }
+    }, HEALTH_PING_INTERVAL_MS);
+
+    return () => {
+      if (healthTimerRef.current !== null) {
+        globalThis.clearInterval(healthTimerRef.current);
+        healthTimerRef.current = null;
+      }
+    };
+  }, [booted, isDisplayMode]);
+
+  useEffect(() => {
     return () => {
       if (reconnectTimerRef.current !== null) {
         globalThis.clearTimeout(reconnectTimerRef.current);
@@ -376,6 +478,9 @@ export default function VillageApp(
       }
       for (const timer of peerDisconnectTimersRef.current.values()) {
         globalThis.clearTimeout(timer);
+      }
+      if (healthTimerRef.current !== null) {
+        globalThis.clearInterval(healthTimerRef.current);
       }
       signalSocketRef.current?.close();
       for (const channel of peerChannelsRef.current.values()) channel.close();
@@ -405,6 +510,29 @@ export default function VillageApp(
   const players = displaySnapshot.participants.filter((participant) =>
     participant.role === "player"
   );
+
+  function sendBumpHitToController(participantId: string, hitCount: number) {
+    const peerId = participantPeerIdsRef.current.get(participantId);
+    if (!peerId) return;
+    sendDisplayEnvelope(peerId, {
+      kind: "bump_hit",
+      hitCount,
+    });
+  }
+
+  function broadcastGameResult(winnerParticipantId: string) {
+    for (const [peerId, channel] of peerChannelsRef.current.entries()) {
+      if (channel.readyState !== "open") continue;
+      const viewerParticipantId = peerParticipantIdsRef.current.get(peerId) ??
+        null;
+      const payload = {
+        kind: "game_result",
+        winnerParticipantId,
+        viewerWon: viewerParticipantId === winnerParticipantId,
+      } satisfies DisplayEnvelope;
+      channel.send(JSON.stringify(payload));
+    }
+  }
 
   function clearVisibleTransportError() {
     if (transportErrorTimerRef.current !== null) {
@@ -499,6 +627,25 @@ export default function VillageApp(
       peerConnectionCount: peerConnectionsRef.current.size,
     });
 
+    const socketToClose = signalSocketRef.current;
+    const channelsToClose = [...peerChannelsRef.current.values()];
+    const connectionsToClose = [...peerConnectionsRef.current.values()];
+    for (const channel of channelsToClose) {
+      if (channel.readyState !== "open") continue;
+      try {
+        channel.send(JSON.stringify(
+          {
+            kind: "controller_event",
+            event: { type: "leaving" },
+          } satisfies ControllerEnvelope,
+        ));
+      } catch (error) {
+        debugLog("controller_leaving_send_failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
     connectionEpochRef.current += 1;
     clientIdRef.current = createClientId();
     const nextParticipantId = crypto.randomUUID();
@@ -518,18 +665,19 @@ export default function VillageApp(
     }
     peerDisconnectTimersRef.current.clear();
 
-    signalSocketRef.current?.close();
     signalSocketRef.current = null;
-    for (const channel of peerChannelsRef.current.values()) channel.close();
-    for (const connection of peerConnectionsRef.current.values()) {
-      connection.close();
-    }
+    globalThis.setTimeout(() => {
+      socketToClose?.close();
+      for (const channel of channelsToClose) channel.close();
+      for (const connection of connectionsToClose) connection.close();
+    }, 120);
 
     peerChannelsRef.current.clear();
     peerConnectionsRef.current.clear();
     peerParticipantIdsRef.current.clear();
     participantPeerIdsRef.current.clear();
     peerRolesRef.current.clear();
+    peerLastPongRef.current.clear();
     pendingCandidatesRef.current.clear();
     setControllerSnapshot(null);
     setResolvedRole(null);
@@ -609,6 +757,19 @@ export default function VillageApp(
     }
   }
 
+  function broadcastLobbyReturn(state: VillageState) {
+    for (const [peerId, channel] of peerChannelsRef.current.entries()) {
+      if (channel.readyState !== "open") continue;
+      const viewerParticipantId = peerParticipantIdsRef.current.get(peerId) ??
+        null;
+      const payload: LobbyReturnEnvelope = {
+        kind: "lobby_return",
+        snapshot: buildVillageSnapshot(state, viewerParticipantId),
+      };
+      channel.send(JSON.stringify(payload));
+    }
+  }
+
   function sendSnapshotToControllers(state: VillageState) {
     for (const [peerId, channel] of peerChannelsRef.current.entries()) {
       if (channel.readyState !== "open") continue;
@@ -637,41 +798,37 @@ export default function VillageApp(
         color: colorForParticipant(participant.id),
       }
     );
+    const debugPlayers = createDebugPracticePlayers(existingPlayers);
+    const rosterForGame = [...playersForGame, ...debugPlayers];
 
     debugLog("game_start", {
-      playerCount: playersForGame.length,
-      participantIds: playersForGame.map((player) => shortId(player.id)),
+      playerCount: rosterForGame.length,
+      participantIds: rosterForGame.map((player) => shortId(player.id)),
+      debugBotCount: debugPlayers.length,
     });
-    gamePlayersRef.current = playersForGame;
-    setGamePlayers(playersForGame);
+    gamePlayersRef.current = rosterForGame;
+    setGamePlayers(rosterForGame);
     setGamePhase("playing");
-    broadcastGameStarted(playersForGame);
+    broadcastGameStarted(rosterForGame);
   }
 
-  function rerollPlayerColor(participantId: string) {
-    const nextPlayers = gamePlayersRef.current.map((player) =>
-      player.id === participantId
-        ? { ...player, color: createRandomPlayerColor() }
-        : player
-    );
-    gamePlayersRef.current = nextPlayers;
-    setGamePlayers(nextPlayers);
-    debugLog("player_color_reroll", {
-      participantId: shortId(participantId),
+  const returnToLobbyFromDisplay = useCallback(() => {
+    debugLog("game_return_to_lobby", {
+      participantCount: gameStateRef.current.participants.length,
+      connectedCount: gameStateRef.current.participants.filter((participant) =>
+        participant.connected
+      ).length,
     });
-  }
+    gameInputsRef.current.clear();
+    setGamePhase("lobby");
+    broadcastLobbyReturn(gameStateRef.current);
+  }, []);
 
   function applyPlayerInput(
     participantId: string,
     input: VillagePlayerInput,
   ) {
-    const wasActionPressed = actionPressedRef.current.get(participantId) ??
-      false;
     gameInputsRef.current.set(participantId, input);
-    actionPressedRef.current.set(participantId, input.action_pressed);
-    if (input.action_pressed && !wasActionPressed) {
-      rerollPlayerColor(participantId);
-    }
   }
 
   function commitDisplayEvent(event: Parameters<typeof reduceVillageState>[1]) {
@@ -687,12 +844,27 @@ export default function VillageApp(
     sendSnapshotToControllers(nextState);
   }
 
-  function cleanupPeer(clientId: string) {
+  function removeParticipantRuntimeState(participantId: string) {
+    gameInputsRef.current.delete(participantId);
+    const nextPlayers = gamePlayersRef.current.filter((player) =>
+      player.id !== participantId
+    );
+    if (nextPlayers.length !== gamePlayersRef.current.length) {
+      gamePlayersRef.current = nextPlayers;
+      setGamePlayers(nextPlayers);
+    }
+  }
+
+  function cleanupPeer(
+    clientId: string,
+    options: { removeParticipant?: boolean } = {},
+  ) {
     clearPeerDisconnectTimer(clientId);
     debugLog("cleanup_peer", {
       peerId: shortId(clientId),
       hasConnection: peerConnectionsRef.current.has(clientId),
       hasChannel: peerChannelsRef.current.has(clientId),
+      removeParticipant: Boolean(options.removeParticipant),
     });
     const channel = peerChannelsRef.current.get(clientId);
     if (channel) {
@@ -708,6 +880,7 @@ export default function VillageApp(
 
     pendingCandidatesRef.current.delete(clientId);
     peerRolesRef.current.delete(clientId);
+    peerLastPongRef.current.delete(clientId);
 
     const participantIdForPeer = peerParticipantIdsRef.current.get(clientId);
     if (participantIdForPeer) {
@@ -718,8 +891,13 @@ export default function VillageApp(
         participantPeerIdsRef.current.delete(participantIdForPeer);
       }
       if (isDisplayMode) {
+        if (options.removeParticipant) {
+          removeParticipantRuntimeState(participantIdForPeer);
+        }
         commitDisplayEvent({
-          type: "peer_disconnected",
+          type: options.removeParticipant
+            ? "peer_removed"
+            : "peer_disconnected",
           participantId: participantIdForPeer,
         });
       }
@@ -738,6 +916,7 @@ export default function VillageApp(
     channel.addEventListener("open", () => {
       if (connectionEpochRef.current !== epoch) return;
       clearPeerDisconnectTimer(peerId);
+      peerLastPongRef.current.set(peerId, Date.now());
       clearVisibleTransportError();
       clearTransientConnectionDetail();
       debugLog("datachannel_open", {
@@ -781,7 +960,7 @@ export default function VillageApp(
       if (connectionEpochRef.current !== epoch) return;
       try {
         const payload = JSON.parse(String(event.data)) as
-          | ControllerEnvelope
+          | ControllerRealtimeEnvelope
           | DisplayEnvelope;
         if (
           payload.kind !== "controller_event" || payload.event.type !== "input"
@@ -796,6 +975,10 @@ export default function VillageApp(
         }
 
         if (isDisplayMode) {
+          if (payload.kind === "health_pong") {
+            peerLastPongRef.current.set(peerId, Date.now());
+            return;
+          }
           if (payload.kind !== "controller_event") return;
 
           if (payload.event.type === "hello") {
@@ -845,6 +1028,14 @@ export default function VillageApp(
             peerId,
           );
           if (!participantIdFromPeer) return;
+          if (payload.event.type === "leaving") {
+            debugLog("controller_leaving", {
+              peerId: shortId(peerId),
+              participantId: shortId(participantIdFromPeer),
+            });
+            cleanupPeer(peerId, { removeParticipant: true });
+            return;
+          }
           if (payload.event.type === "start_game") {
             if (
               participantIdFromPeer === gameStateRef.current.hostParticipantId
@@ -869,6 +1060,18 @@ export default function VillageApp(
           return;
         }
 
+        if (payload.kind === "health_ping") {
+          if (channel.readyState === "open") {
+            channel.send(JSON.stringify(
+              {
+                kind: "health_pong",
+                sentAt: payload.sentAt,
+                receivedAt: Date.now(),
+              } satisfies ControllerRealtimeEnvelope,
+            ));
+          }
+          return;
+        }
         if (payload.kind === "snapshot") {
           setControllerSnapshot(payload.snapshot);
           setResolvedRole(payload.snapshot.isHost ? "host" : "player");
@@ -877,6 +1080,27 @@ export default function VillageApp(
         if (payload.kind === "game_started") {
           setGamePlayers(payload.players);
           setGamePhase("playing");
+          return;
+        }
+        if (payload.kind === "bump_hit") {
+          if (payload.hitCount > 0) {
+            triggerShortBuzz();
+          }
+          return;
+        }
+        if (payload.kind === "game_result") {
+          if (payload.viewerWon) {
+            triggerStrongBuzz();
+          } else {
+            triggerErrorBuzz();
+          }
+          return;
+        }
+        if (payload.kind === "lobby_return") {
+          setControllerSnapshot(payload.snapshot);
+          setResolvedRole(payload.snapshot.isHost ? "host" : "player");
+          setGamePhase("lobby");
+          return;
         }
       } catch {
         debugLog("datachannel_message_malformed", { peerId: shortId(peerId) });
@@ -1471,6 +1695,7 @@ export default function VillageApp(
     peerParticipantIdsRef.current.clear();
     participantPeerIdsRef.current.clear();
     peerRolesRef.current.clear();
+    peerLastPongRef.current.clear();
     pendingCandidatesRef.current.clear();
 
     const socketProtocol = globalThis.location.protocol === "https:"
@@ -1635,6 +1860,9 @@ export default function VillageApp(
           players={gamePlayers}
           connectedPlayerIds={connectedPlayerIds}
           inputsRef={gameInputsRef}
+          onReturnToLobby={returnToLobbyFromDisplay}
+          onBumpHit={sendBumpHitToController}
+          onGameResult={broadcastGameResult}
         />
       );
     }
@@ -1770,6 +1998,12 @@ export default function VillageApp(
     Boolean(controllerSnapshot?.isHost) &&
     Boolean(trimName(participantName)) &&
     openControllerChannelCount > 0;
+  const controllerPlayerColor = gamePlayers.find((player) =>
+    player.id === controllerSnapshot?.viewerParticipantId
+  )?.color;
+  const controllerBackgroundColor = controllerPlayerColor === undefined
+    ? "#fff7fb"
+    : cssColorFromNumber(controllerPlayerColor);
 
   if (controllerSanitized) {
     return (
@@ -1800,6 +2034,7 @@ export default function VillageApp(
         name={displayGameName(controllerDisplayName)}
         signalStatus={signalStatus}
         connectionDetail={connectionDetail}
+        backgroundColor={controllerBackgroundColor}
         onInput={sendGameInput}
         onDisconnect={sanitizeControllerConnection}
       />
