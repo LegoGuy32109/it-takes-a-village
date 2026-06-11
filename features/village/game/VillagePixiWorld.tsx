@@ -6,6 +6,7 @@ interface VillagePixiWorldProps {
   players: GameStartedPlayer[];
   connectedPlayerIds: Set<string>;
   inputsRef: { current: Map<string, VillagePlayerInput> };
+  debugKeyboardPlayerId: string | null;
   onReturnToLobby: () => void;
   onBumpHit: (participantId: string, hitCount: number) => void;
   onGameResult: (winnerParticipantId: string) => void;
@@ -31,6 +32,7 @@ interface RenderedPlayer {
   attackStartedAtMs: number;
   attackVisibleUntilMs: number;
   attackAngle: number;
+  knockbackUntilMs: number;
   aiSeed: number;
 }
 
@@ -55,17 +57,17 @@ interface TriviaZone {
 const PLAYER_SIZE = 34;
 const PLAYER_BORDER_SIZE = 2;
 const PLAYER_RADIUS = PLAYER_SIZE / 2;
-const PLAYER_HALF_DIAGONAL = Math.SQRT2 * PLAYER_RADIUS;
 const PLAYER_TOP_SPEED_PX_PER_SECOND = 250;
 const PLAYER_ACCELERATION_PX_PER_SECOND_SQUARED = 1800;
 const PLAYER_DRAG_PER_SECOND = 6.5;
 const STUN_MOVEMENT_SCALE = 0.3;
 const BUMP_COOLDOWN_MS = 1000;
 const BUMP_STUN_MS = 400;
-const BUMP_KNOCKBACK_PX_PER_SECOND = 22000;
-const BUMP_ORIGIN_OFFSET = PLAYER_RADIUS * 0.95;
-const BUMP_CONE_HALF_ANGLE_RADIANS = Math.PI / 6;
-const BUMP_CONE_LENGTH = PLAYER_RADIUS * 1.5;
+const BUMP_KNOCKBACK_PX_PER_SECOND = 1500;
+const BUMP_KNOCKBACK_DRAG_PER_SECOND = 1.25;
+const BUMP_KNOCKBACK_TOP_SPEED_PX_PER_SECOND = 1500;
+const BUMP_KNOCKBACK_DURATION_MS = 280;
+const BUMP_HIT_RADIUS = PLAYER_RADIUS * 3.25;
 const BUMP_VISUAL_HIT_WINDOW_MS = 100;
 const BUMP_VISUAL_FADE_MS = 150;
 const LABEL_LIMIT = 12;
@@ -109,18 +111,40 @@ function vectorLength(x: number, y: number): number {
   return Math.hypot(x, y);
 }
 
-function angleDeltaRadians(
+function vectorDot(
   leftX: number,
   leftY: number,
   rightX: number,
   rightY: number,
 ): number {
-  const leftAngle = Math.atan2(leftY, leftX);
-  const rightAngle = Math.atan2(rightY, rightX);
-  let delta = leftAngle - rightAngle;
-  while (delta > Math.PI) delta -= Math.PI * 2;
-  while (delta < -Math.PI) delta += Math.PI * 2;
-  return delta;
+  return leftX * rightX + leftY * rightY;
+}
+
+function createKeyboardInput(
+  keys: Set<string>,
+  actionPressed: boolean,
+  seq: number,
+): VillagePlayerInput {
+  const moveLeft = keys.has("KeyA");
+  const moveRight = keys.has("KeyD");
+  const moveUp = keys.has("KeyW");
+  const moveDown = keys.has("KeyS");
+  let x = (moveRight ? 1 : 0) - (moveLeft ? 1 : 0);
+  let y = (moveDown ? 1 : 0) - (moveUp ? 1 : 0);
+  const magnitude = Math.hypot(x, y);
+
+  if (magnitude > 1) {
+    x /= magnitude;
+    y /= magnitude;
+  }
+
+  return {
+    x,
+    y,
+    action_pressed: actionPressed,
+    seq,
+    sentAt: Date.now(),
+  };
 }
 
 function botSeed(id: string): number {
@@ -567,12 +591,16 @@ export function VillagePixiWorld(
     players,
     connectedPlayerIds,
     inputsRef,
+    debugKeyboardPlayerId,
     onReturnToLobby,
     onBumpHit,
     onGameResult,
   }: VillagePixiWorldProps,
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const keyboardKeysRef = useRef(new Set<string>());
+  const keyboardActionPressedRef = useRef(false);
+  const keyboardSeqRef = useRef(0);
   const renderedPlayersRef = useRef(new Map<string, RenderedPlayer>());
   const scoresRef = useRef(new Map<string, number>());
   const playersRef = useRef(players);
@@ -585,6 +613,79 @@ export function VillagePixiWorld(
   useEffect(() => {
     connectedPlayerIdsRef.current = connectedPlayerIds;
   }, [connectedPlayerIds]);
+
+  useEffect(() => {
+    if (!debugKeyboardPlayerId) return;
+
+    const sendKeyboardInput = () => {
+      keyboardSeqRef.current += 1;
+      inputsRef.current.set(
+        debugKeyboardPlayerId,
+        createKeyboardInput(
+          keyboardKeysRef.current,
+          keyboardActionPressedRef.current,
+          keyboardSeqRef.current,
+        ),
+      );
+    };
+
+    const resetKeyboardInput = () => {
+      keyboardKeysRef.current.clear();
+      keyboardActionPressedRef.current = false;
+      inputsRef.current.delete(debugKeyboardPlayerId);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.repeat) return;
+      if (
+        event.code !== "KeyW" && event.code !== "KeyA" &&
+        event.code !== "KeyS" && event.code !== "KeyD" &&
+        event.code !== "Space"
+      ) {
+        return;
+      }
+      event.preventDefault();
+      if (event.code === "Space") {
+        keyboardActionPressedRef.current = true;
+      } else {
+        keyboardKeysRef.current.add(event.code);
+      }
+      sendKeyboardInput();
+    };
+
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (
+        event.code !== "KeyW" && event.code !== "KeyA" &&
+        event.code !== "KeyS" && event.code !== "KeyD" &&
+        event.code !== "Space"
+      ) {
+        return;
+      }
+      event.preventDefault();
+      if (event.code === "Space") {
+        keyboardActionPressedRef.current = false;
+      } else {
+        keyboardKeysRef.current.delete(event.code);
+      }
+      sendKeyboardInput();
+    };
+
+    const handleBlur = () => {
+      resetKeyboardInput();
+    };
+
+    sendKeyboardInput();
+    globalThis.addEventListener("keydown", handleKeyDown);
+    globalThis.addEventListener("keyup", handleKeyUp);
+    globalThis.addEventListener("blur", handleBlur);
+
+    return () => {
+      globalThis.removeEventListener("keydown", handleKeyDown);
+      globalThis.removeEventListener("keyup", handleKeyUp);
+      globalThis.removeEventListener("blur", handleBlur);
+      resetKeyboardInput();
+    };
+  }, [debugKeyboardPlayerId, inputsRef]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -968,8 +1069,6 @@ export function VillagePixiWorld(
           const attackDirection = direction.x === 0 && direction.y === 0
             ? { x: 0, y: -1 }
             : direction;
-          const originX = player.x + attackDirection.x * BUMP_ORIGIN_OFFSET;
-          const originY = player.y + attackDirection.y * BUMP_ORIGIN_OFFSET;
           const hits: RenderedPlayer[] = [];
 
           player.nextBumpAtMs = nowMs + BUMP_COOLDOWN_MS;
@@ -983,32 +1082,56 @@ export function VillagePixiWorld(
           for (const target of renderedPlayersRef.current.values()) {
             if (target.id === player.id) continue;
 
-            const offsetX = target.x - originX;
-            const offsetY = target.y - originY;
+            const offsetX = target.x - player.x;
+            const offsetY = target.y - player.y;
             const distance = vectorLength(offsetX, offsetY);
-            if (distance > BUMP_CONE_LENGTH + PLAYER_HALF_DIAGONAL) continue;
+            if (distance > BUMP_HIT_RADIUS + PLAYER_RADIUS) continue;
 
-            if (distance > 0) {
-              const targetDirection = normalizeVector(offsetX, offsetY);
-              const delta = Math.abs(
-                angleDeltaRadians(
-                  attackDirection.x,
-                  attackDirection.y,
-                  targetDirection.x,
-                  targetDirection.y,
-                ),
-              );
-              if (delta > BUMP_CONE_HALF_ANGLE_RADIANS) continue;
-            }
+            const targetDirection = distance > 0
+              ? normalizeVector(offsetX, offsetY)
+              : attackDirection;
+            const forwardDot = vectorDot(
+              attackDirection.x,
+              attackDirection.y,
+              targetDirection.x,
+              targetDirection.y,
+            );
+            if (forwardDot <= 0) continue;
 
             hits.push(target);
-            target.velocityX += attackDirection.x *
-              BUMP_KNOCKBACK_PX_PER_SECOND;
-            target.velocityY += attackDirection.y *
-              BUMP_KNOCKBACK_PX_PER_SECOND;
+            const alignment = clamp(forwardDot, 0, 1);
+            const distanceFactor = 1 - clamp(distance / BUMP_HIT_RADIUS, 0, 1);
+            const lateralDirection = {
+              x: targetDirection.x - attackDirection.x * forwardDot,
+              y: targetDirection.y - attackDirection.y * forwardDot,
+            };
+            const lateralLength = vectorLength(
+              lateralDirection.x,
+              lateralDirection.y,
+            );
+            const normalizedLateral = lateralLength > 0
+              ? {
+                x: lateralDirection.x / lateralLength,
+                y: lateralDirection.y / lateralLength,
+              }
+              : { x: 0, y: 0 };
+            const launchSpeed = BUMP_KNOCKBACK_PX_PER_SECOND *
+              (0.72 + alignment * 0.55 + distanceFactor * 0.4);
+            const sidePush = (1 - alignment) * launchSpeed * 0.42;
+
+            target.velocityX = target.velocityX * 0.2 +
+              attackDirection.x * launchSpeed +
+              normalizedLateral.x * sidePush;
+            target.velocityY = target.velocityY * 0.2 +
+              attackDirection.y * launchSpeed +
+              normalizedLateral.y * sidePush;
+            target.knockbackUntilMs = Math.max(
+              target.knockbackUntilMs,
+              nowMs + BUMP_KNOCKBACK_DURATION_MS,
+            );
             target.stunUntilMs = Math.max(
               target.stunUntilMs,
-              nowMs + BUMP_STUN_MS,
+              nowMs + BUMP_STUN_MS + BUMP_KNOCKBACK_DURATION_MS / 2,
             );
           }
 
@@ -1036,6 +1159,7 @@ export function VillagePixiWorld(
             ? normalizeVector(inputX, inputY)
             : { x: 0, y: 0 };
           const stunned = nowMs < player.stunUntilMs;
+          const knockbackActive = nowMs < player.knockbackUntilMs;
 
           if (inputMagnitude > 0) {
             player.facingX = inputDirection.x;
@@ -1056,13 +1180,20 @@ export function VillagePixiWorld(
             player.velocityY += inputDirection.y * acceleration * deltaSeconds;
           }
 
-          const drag = Math.exp(-PLAYER_DRAG_PER_SECOND * deltaSeconds);
+          const drag = Math.exp(
+            -(knockbackActive
+              ? BUMP_KNOCKBACK_DRAG_PER_SECOND
+              : PLAYER_DRAG_PER_SECOND) * deltaSeconds,
+          );
           player.velocityX *= drag;
           player.velocityY *= drag;
 
           const speed = vectorLength(player.velocityX, player.velocityY);
-          if (speed > PLAYER_TOP_SPEED_PX_PER_SECOND) {
-            const clamped = PLAYER_TOP_SPEED_PX_PER_SECOND / speed;
+          const topSpeed = knockbackActive
+            ? BUMP_KNOCKBACK_TOP_SPEED_PX_PER_SECOND
+            : PLAYER_TOP_SPEED_PX_PER_SECOND;
+          if (speed > topSpeed) {
+            const clamped = topSpeed / speed;
             player.velocityX *= clamped;
             player.velocityY *= clamped;
           }
@@ -1239,6 +1370,7 @@ export function VillagePixiWorld(
               attackStartedAtMs: 0,
               attackVisibleUntilMs: 0,
               attackAngle: -Math.PI / 2,
+              knockbackUntilMs: 0,
               aiSeed: botSeed(player.id),
             });
           });

@@ -42,6 +42,8 @@ interface VillageAppProps {
 
 const PARTICIPANT_ID_STORAGE_KEY = "village:participant-id";
 const PARTICIPANT_NAME_STORAGE_KEY = "village:participant-name";
+const DEBUG_LOCAL_PLAYER_ID = "debug-local-player";
+const DEBUG_LOCAL_PLAYER_NAME = "Player";
 const PLAYER_COLORS = [
   0xffdbdb,
   0xcff1fb,
@@ -220,6 +222,13 @@ function colorForDebugBot(index: number): number {
   return shiftColorBrightness(baseColor, brightness);
 }
 
+function colorForDebugLocalPlayer(): number {
+  const seed = hashString(DEBUG_LOCAL_PLAYER_ID);
+  const baseColor = PLAYER_COLORS[seed % PLAYER_COLORS.length];
+  const brightness = (seededUnit(seed ^ 0x7b1d2c) - 0.5) * 0.12;
+  return shiftColorBrightness(baseColor, brightness);
+}
+
 function cssColorFromNumber(color: number): string {
   return `#${color.toString(16).padStart(6, "0")}`;
 }
@@ -260,6 +269,16 @@ function createDebugPracticePlayers(
   });
 }
 
+function createDebugLocalPlayer(
+  existingPlayers: Map<string, GameStartedPlayer>,
+): GameStartedPlayer {
+  return existingPlayers.get(DEBUG_LOCAL_PLAYER_ID) ?? {
+    id: DEBUG_LOCAL_PLAYER_ID,
+    name: DEBUG_LOCAL_PLAYER_NAME,
+    color: colorForDebugLocalPlayer(),
+  };
+}
+
 const PLACEHOLDER_DISPLAY_STATE = createVillageState(
   "pending",
   "JOIN00",
@@ -297,6 +316,7 @@ export default function VillageApp(
   const [controllerSanitized, setControllerSanitized] = useState(false);
   const [gamePhase, setGamePhase] = useState<"lobby" | "playing">("lobby");
   const [gamePlayers, setGamePlayers] = useState<GameStartedPlayer[]>([]);
+  const [debugGameActive, setDebugGameActive] = useState(false);
 
   const clientIdRef = useRef(createClientId());
   const participantNameRef = useRef("");
@@ -411,6 +431,33 @@ export default function VillageApp(
     import("pixi.js")
       .then(() => debugLog("pixi_preload_complete"))
       .catch(() => debugLog("pixi_preload_failed"));
+  }, [booted, gamePhase, isDisplayMode]);
+
+  useEffect(() => {
+    if (!booted || !isDisplayMode || gamePhase !== "lobby") return;
+
+    function handleLobbyKeydown(event: KeyboardEvent) {
+      if (event.repeat || event.code !== "Space") return;
+      const target = event.target as HTMLElement | null;
+      const tagName = target?.tagName?.toLowerCase();
+      if (
+        tagName === "input" || tagName === "textarea" ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      debugLog("debug_lobby_start_pressed", {
+        key: event.code,
+      });
+      startDebugGameFromDisplay();
+    }
+
+    globalThis.addEventListener("keydown", handleLobbyKeydown);
+    return () => {
+      globalThis.removeEventListener("keydown", handleLobbyKeydown);
+    };
   }, [booted, gamePhase, isDisplayMode]);
 
   useEffect(() => {
@@ -806,8 +853,41 @@ export default function VillageApp(
       participantIds: rosterForGame.map((player) => shortId(player.id)),
       debugBotCount: debugPlayers.length,
     });
+    setDebugGameActive(false);
     gamePlayersRef.current = rosterForGame;
     setGamePlayers(rosterForGame);
+    setGamePhase("playing");
+    broadcastGameStarted(rosterForGame);
+  }
+
+  function startDebugGameFromDisplay() {
+    const currentState = gameStateRef.current;
+    const existingPlayers = new Map(
+      gamePlayersRef.current.map((player) => [player.id, player]),
+    );
+    const eligibleParticipants = currentState.participants.filter((
+      participant,
+    ) => participant.connected && trimName(participant.name));
+    const playersForGame = eligibleParticipants.map((participant) =>
+      existingPlayers.get(participant.id) ?? {
+        id: participant.id,
+        name: displayGameName(participant.name),
+        color: colorForParticipant(participant.id),
+      }
+    );
+    const localPlayer = createDebugLocalPlayer(existingPlayers);
+    const debugPlayers = createDebugPracticePlayers(existingPlayers);
+    const rosterForGame = [localPlayer, ...playersForGame, ...debugPlayers];
+
+    debugLog("debug_game_start", {
+      playerCount: rosterForGame.length,
+      participantIds: rosterForGame.map((player) => shortId(player.id)),
+      debugBotCount: debugPlayers.length,
+      localPlayerId: shortId(localPlayer.id),
+    });
+    gamePlayersRef.current = rosterForGame;
+    setGamePlayers(rosterForGame);
+    setDebugGameActive(true);
     setGamePhase("playing");
     broadcastGameStarted(rosterForGame);
   }
@@ -820,6 +900,7 @@ export default function VillageApp(
       ).length,
     });
     gameInputsRef.current.clear();
+    setDebugGameActive(false);
     setGamePhase("lobby");
     broadcastLobbyReturn(gameStateRef.current);
   }, []);
@@ -1860,6 +1941,7 @@ export default function VillageApp(
           players={gamePlayers}
           connectedPlayerIds={connectedPlayerIds}
           inputsRef={gameInputsRef}
+          debugKeyboardPlayerId={debugGameActive ? DEBUG_LOCAL_PLAYER_ID : null}
           onReturnToLobby={returnToLobbyFromDisplay}
           onBumpHit={sendBumpHitToController}
           onGameResult={broadcastGameResult}
@@ -1968,6 +2050,10 @@ export default function VillageApp(
                 qr={joinQr}
                 color="text-[#667fa3]"
               />
+              <div class="rounded-2xl border border-[#f0d7bd] bg-[#fffaf2] px-4 py-3 text-sm font-semibold text-[#8a6a4a]">
+                Press Space to start a debug match with the local keyboard
+                player and practice bots.
+              </div>
               {transportError && (
                 <div class="rounded-2xl border border-[#f0b9ad] bg-[#ffe5df] px-4 py-3 text-sm text-[#875548]">
                   {transportError}
