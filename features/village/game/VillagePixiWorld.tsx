@@ -59,15 +59,19 @@ const PLAYER_BORDER_SIZE = 2;
 const PLAYER_RADIUS = PLAYER_SIZE / 2;
 const PLAYER_TOP_SPEED_PX_PER_SECOND = 250;
 const PLAYER_ACCELERATION_PX_PER_SECOND_SQUARED = 1800;
-const PLAYER_DRAG_PER_SECOND = 6.5;
+const PLAYER_DRAG_PER_SECOND = 1.1;
 const STUN_MOVEMENT_SCALE = 0.3;
 const BUMP_COOLDOWN_MS = 1000;
 const BUMP_STUN_MS = 400;
-const BUMP_KNOCKBACK_PX_PER_SECOND = 1500;
-const BUMP_KNOCKBACK_DRAG_PER_SECOND = 1.25;
-const BUMP_KNOCKBACK_TOP_SPEED_PX_PER_SECOND = 1500;
-const BUMP_KNOCKBACK_DURATION_MS = 280;
+const BUMP_KNOCKBACK_PX_PER_SECOND = 1350;
+const BUMP_KNOCKBACK_DRAG_PER_SECOND = 1.1;
+const BUMP_KNOCKBACK_TOP_SPEED_PX_PER_SECOND = 1350;
+const BUMP_KNOCKBACK_DURATION_MS = 900;
 const BUMP_HIT_RADIUS = PLAYER_RADIUS * 3.25;
+const WALL_RESTITUTION = 0.82;
+const PLAYER_COLLISION_RESTITUTION = 0.9;
+const WALL_MOMENTUM_EXTENSION_MS = 450;
+const PLAYER_COLLISION_MOMENTUM_EXTENSION_MS = 250;
 const BUMP_VISUAL_HIT_WINDOW_MS = 100;
 const BUMP_VISUAL_FADE_MS = 150;
 const LABEL_LIMIT = 12;
@@ -492,15 +496,9 @@ function drawAttackOverlay(
 
   graphics
     .arc(crescentCenterX, 0, outerRadius, arcStart, arcEnd)
-    .stroke({ color: 0x525252, width: PLAYER_RADIUS * 0.5, alpha: 0.62 })
+    .stroke({ color, width: PLAYER_RADIUS * 0.16, alpha: 0.22 })
     .arc(crescentCenterX, 0, innerRadius, arcStart, arcEnd)
-    .stroke({ color, width: PLAYER_RADIUS * 0.24, alpha: 0.92 })
-    .arc(crescentCenterX, 0, innerRadius * 0.88, arcStart, arcEnd)
-    .stroke({
-      color: darkenColor(color),
-      width: PLAYER_RADIUS * 0.12,
-      alpha: 0.28,
-    });
+    .stroke({ color, width: PLAYER_RADIUS * 0.22, alpha: 0.9 });
 }
 
 function drawDashedRect(
@@ -1210,22 +1208,38 @@ export function VillagePixiWorld(
 
           if (player.x < minX) {
             player.x = minX;
-            player.velocityX = Math.max(0, player.velocityX);
+            player.velocityX = Math.abs(player.velocityX) * WALL_RESTITUTION;
+            player.knockbackUntilMs = Math.max(
+              player.knockbackUntilMs,
+              nowMs + WALL_MOMENTUM_EXTENSION_MS,
+            );
           } else if (player.x > maxX) {
             player.x = maxX;
-            player.velocityX = Math.min(0, player.velocityX);
+            player.velocityX = -Math.abs(player.velocityX) * WALL_RESTITUTION;
+            player.knockbackUntilMs = Math.max(
+              player.knockbackUntilMs,
+              nowMs + WALL_MOMENTUM_EXTENSION_MS,
+            );
           }
 
           if (player.y < minY) {
             player.y = minY;
-            player.velocityY = Math.max(0, player.velocityY);
+            player.velocityY = Math.abs(player.velocityY) * WALL_RESTITUTION;
+            player.knockbackUntilMs = Math.max(
+              player.knockbackUntilMs,
+              nowMs + WALL_MOMENTUM_EXTENSION_MS,
+            );
           } else if (player.y > maxY) {
             player.y = maxY;
-            player.velocityY = Math.min(0, player.velocityY);
+            player.velocityY = -Math.abs(player.velocityY) * WALL_RESTITUTION;
+            player.knockbackUntilMs = Math.max(
+              player.knockbackUntilMs,
+              nowMs + WALL_MOMENTUM_EXTENSION_MS,
+            );
           }
         }
 
-        function resolvePlayerCollisions() {
+        function resolvePlayerCollisions(nowMs: number) {
           const players = [...renderedPlayersRef.current.values()];
 
           for (let pass = 0; pass < 3; pass += 1) {
@@ -1243,31 +1257,52 @@ export function VillagePixiWorld(
                 const right = players[rightIndex];
                 const deltaX = right.x - left.x;
                 const deltaY = right.y - left.y;
-                const overlapX = PLAYER_SIZE - Math.abs(deltaX);
-                const overlapY = PLAYER_SIZE - Math.abs(deltaY);
-                if (overlapX <= 0 || overlapY <= 0) continue;
+                const distance = vectorLength(deltaX, deltaY);
+                const minDistance = PLAYER_SIZE;
+                if (distance >= minDistance) continue;
 
-                if (overlapX < overlapY) {
-                  const normalX = deltaX === 0
-                    ? Math.sign(left.velocityX - right.velocityX) || 1
-                    : Math.sign(deltaX);
-                  const separation = overlapX / 2 + 0.01;
-                  left.x -= normalX * separation;
-                  right.x += normalX * separation;
-                  const leftVelocityX = left.velocityX;
-                  left.velocityX = right.velocityX;
-                  right.velocityX = leftVelocityX;
-                } else {
-                  const normalY = deltaY === 0
-                    ? Math.sign(left.velocityY - right.velocityY) || 1
-                    : Math.sign(deltaY);
-                  const separation = overlapY / 2 + 0.01;
-                  left.y -= normalY * separation;
-                  right.y += normalY * separation;
-                  const leftVelocityY = left.velocityY;
-                  left.velocityY = right.velocityY;
-                  right.velocityY = leftVelocityY;
-                }
+                const normal = distance > 0
+                  ? { x: deltaX / distance, y: deltaY / distance }
+                  : normalizeVector(
+                    left.velocityX - right.velocityX,
+                    left.velocityY - right.velocityY,
+                  );
+                const collisionNormal = normal.x === 0 && normal.y === 0
+                  ? { x: 1, y: 0 }
+                  : normal;
+                const penetration = minDistance - distance;
+                const separation = penetration / 2 + 0.01;
+                left.x -= collisionNormal.x * separation;
+                left.y -= collisionNormal.y * separation;
+                right.x += collisionNormal.x * separation;
+                right.y += collisionNormal.y * separation;
+
+                const relativeVelocityX = right.velocityX - left.velocityX;
+                const relativeVelocityY = right.velocityY - left.velocityY;
+                const velocityAlongNormal = vectorDot(
+                  relativeVelocityX,
+                  relativeVelocityY,
+                  collisionNormal.x,
+                  collisionNormal.y,
+                );
+                if (velocityAlongNormal > 0) continue;
+
+                const impulseMagnitude = -(1 + PLAYER_COLLISION_RESTITUTION) *
+                  velocityAlongNormal / 2;
+                const impulseX = collisionNormal.x * impulseMagnitude;
+                const impulseY = collisionNormal.y * impulseMagnitude;
+                left.velocityX -= impulseX;
+                left.velocityY -= impulseY;
+                right.velocityX += impulseX;
+                right.velocityY += impulseY;
+                left.knockbackUntilMs = Math.max(
+                  left.knockbackUntilMs,
+                  nowMs + PLAYER_COLLISION_MOMENTUM_EXTENSION_MS,
+                );
+                right.knockbackUntilMs = Math.max(
+                  right.knockbackUntilMs,
+                  nowMs + PLAYER_COLLISION_MOMENTUM_EXTENSION_MS,
+                );
               }
             }
           }
@@ -1420,7 +1455,7 @@ export function VillagePixiWorld(
             updatePlayerMotion(rendered, deltaSeconds, nowMs);
           }
 
-          resolvePlayerCollisions();
+          resolvePlayerCollisions(nowMs);
 
           for (const rendered of renderedPlayersRef.current.values()) {
             rendered.body.x = rendered.x;
