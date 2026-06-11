@@ -83,12 +83,7 @@ function writeStoredValue(key: string, value: string) {
 }
 
 function createFreshDisplayState(): VillageState {
-  const playerCode = createJoinCode();
-  return createVillageState(
-    createSessionId(),
-    createJoinCode(playerCode),
-    playerCode,
-  );
+  return createVillageState(createSessionId(), createJoinCode());
 }
 
 function buildJoinLink(code: string): string {
@@ -233,8 +228,7 @@ function signalPayloadKind(
 
 const PLACEHOLDER_DISPLAY_STATE = createVillageState(
   "pending",
-  "HOST00",
-  "PLAY00",
+  "JOIN00",
 );
 
 export default function VillageApp(
@@ -395,21 +389,13 @@ export default function VillageApp(
     () => buildVillageSnapshot(displayState, null),
     [displayState],
   );
-  const hostLink = useMemo(
-    () => buildJoinLink(displayState.hostCode),
-    [displayState.hostCode],
+  const joinLink = useMemo(
+    () => buildJoinLink(displayState.joinCode),
+    [displayState.joinCode],
   );
-  const playerLink = useMemo(
-    () => buildJoinLink(displayState.playerCode),
-    [displayState.playerCode],
-  );
-  const hostQr = useMemo(
-    () => makeSvgDataUrl(qrcode(hostLink, { output: "svg" })),
-    [hostLink],
-  );
-  const playerQr = useMemo(
-    () => makeSvgDataUrl(qrcode(playerLink, { output: "svg" })),
-    [playerLink],
+  const joinQr = useMemo(
+    () => makeSvgDataUrl(qrcode(joinLink, { output: "svg" })),
+    [joinLink],
   );
   const host = displaySnapshot.hostParticipantId
     ? displaySnapshot.participants.find((participant) =>
@@ -813,34 +799,43 @@ export default function VillageApp(
           if (payload.kind !== "controller_event") return;
 
           if (payload.event.type === "hello") {
+            const helloEvent = payload.event;
             const previousPeerId = participantPeerIdsRef.current.get(
-              payload.event.participantId,
+              helloEvent.participantId,
             );
             if (previousPeerId && previousPeerId !== peerId) {
               cleanupPeer(previousPeerId);
             }
 
-            const assignedRole = peerRolesRef.current.get(peerId) ??
-              payload.event.role;
+            const existingParticipant = gameStateRef.current.participants.find(
+              (participant) => participant.id === helloEvent.participantId,
+            );
+            const assignedRole: ControllerRole =
+              gameStateRef.current.hostParticipantId ===
+                  helloEvent.participantId ||
+                (!gameStateRef.current.hostParticipantId &&
+                  !existingParticipant)
+                ? "host"
+                : existingParticipant?.role ?? "player";
             peerParticipantIdsRef.current.set(
               peerId,
-              payload.event.participantId,
+              helloEvent.participantId,
             );
             participantPeerIdsRef.current.set(
-              payload.event.participantId,
+              helloEvent.participantId,
               peerId,
             );
             commitDisplayEvent({
               type: "peer_connected",
-              participantId: payload.event.participantId,
-              name: payload.event.name,
+              participantId: helloEvent.participantId,
+              name: helloEvent.name,
               role: assignedRole,
             });
             if (gamePhaseRef.current === "playing") {
               sendDisplayEnvelope(peerId, {
                 kind: "game_started",
                 players: gamePlayersRef.current,
-                viewerParticipantId: payload.event.participantId,
+                viewerParticipantId: helloEvent.participantId,
               });
             }
             return;
@@ -876,6 +871,7 @@ export default function VillageApp(
 
         if (payload.kind === "snapshot") {
           setControllerSnapshot(payload.snapshot);
+          setResolvedRole(payload.snapshot.isHost ? "host" : "player");
           return;
         }
         if (payload.kind === "game_started") {
@@ -1487,8 +1483,7 @@ export default function VillageApp(
     if (isDisplayMode) {
       signalUrl.searchParams.set("kind", "display");
       signalUrl.searchParams.set("session", displayState.sessionId);
-      signalUrl.searchParams.set("hostCode", displayState.hostCode);
-      signalUrl.searchParams.set("playerCode", displayState.playerCode);
+      signalUrl.searchParams.set("code", displayState.joinCode);
     } else {
       signalUrl.searchParams.set("kind", "controller");
       signalUrl.searchParams.set("code", joinCode);
@@ -1521,8 +1516,7 @@ export default function VillageApp(
         sendSignalMessage({
           type: "register_room",
           sessionId: displayState.sessionId,
-          hostCode: displayState.hostCode,
-          playerCode: displayState.playerCode,
+          joinCode: displayState.joinCode,
         });
       }
     });
@@ -1579,8 +1573,7 @@ export default function VillageApp(
     booted,
     connectAttempt,
     controllerSanitized,
-    displayState.hostCode,
-    displayState.playerCode,
+    displayState.joinCode,
     displayState.sessionId,
     iceServers,
     isDisplayMode,
@@ -1695,7 +1688,7 @@ export default function VillageApp(
                   <p class="mt-2 text-sm text-[#667285]">
                     {host?.connected
                       ? "Host controller connected."
-                      : "The host joins with the private code."}
+                      : "The first helper to join becomes host."}
                   </p>
                 </div>
 
@@ -1732,7 +1725,7 @@ export default function VillageApp(
                   ))}
                   {players.length === 0 && (
                     <div class="rounded-2xl border-2 border-dashed border-[#e7c8d5] bg-white/50 px-4 py-8 text-center text-[#8d7689] sm:col-span-2 xl:col-span-3">
-                      Share the player code to fill the village.
+                      Share the join code to fill the village.
                     </div>
                   )}
                 </div>
@@ -1741,18 +1734,11 @@ export default function VillageApp(
 
             <aside class="space-y-5">
               <JoinCard
-                title="Player Code"
-                code={displayState.playerCode}
-                note="Public code for every helper."
-                qr={playerQr}
+                title="Join Code"
+                code={displayState.joinCode}
+                note="First helper to join becomes host."
+                qr={joinQr}
                 color="text-[#667fa3]"
-              />
-              <JoinCard
-                title="Host Code"
-                code={displayState.hostCode}
-                note="Private code for the room leader."
-                qr={hostQr}
-                color="text-[#a06d85]"
               />
               {transportError && (
                 <div class="rounded-2xl border border-[#f0b9ad] bg-[#ffe5df] px-4 py-3 text-sm text-[#875548]">

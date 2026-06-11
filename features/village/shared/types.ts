@@ -11,8 +11,7 @@ export interface VillageParticipant {
 
 export interface VillageState {
   sessionId: string;
-  hostCode: string;
-  playerCode: string;
+  joinCode: string;
   participants: VillageParticipant[];
   hostParticipantId: string | null;
 }
@@ -119,8 +118,7 @@ export type SignalClientMessage =
   | {
     type: "register_room";
     sessionId: string;
-    hostCode: string;
-    playerCode: string;
+    joinCode: string;
   }
   | {
     type: "signal";

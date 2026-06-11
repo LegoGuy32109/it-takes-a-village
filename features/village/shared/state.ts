@@ -20,13 +20,11 @@ function trimName(name: string): string {
 
 export function createVillageState(
   sessionId: string,
-  hostCode: string,
-  playerCode: string,
+  joinCode: string,
 ): VillageState {
   return {
     sessionId,
-    hostCode,
-    playerCode,
+    joinCode,
     participants: [],
     hostParticipantId: null,
   };
@@ -86,9 +84,6 @@ export function reduceVillageState(
       return {
         ...state,
         participants: nextParticipants,
-        hostParticipantId: state.hostParticipantId === event.participantId
-          ? null
-          : state.hostParticipantId,
       };
     }
     case "controller_event": {

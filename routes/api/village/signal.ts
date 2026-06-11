@@ -18,8 +18,7 @@ interface SignalConnection {
 interface VillageSignalRoom {
   sessionId: string;
   displayClientId: string | null;
-  hostCode: string;
-  playerCode: string;
+  joinCode: string;
   createdAt: number;
   lastSeenAt: number;
   connections: Map<string, SignalConnection>;
@@ -106,8 +105,7 @@ function deleteRoom(room: VillageSignalRoom) {
   for (const timer of room.disconnectTimers.values()) clearTimeout(timer);
   room.disconnectTimers.clear();
   roomsBySessionId.delete(room.sessionId);
-  sessionIdByCode.delete(room.hostCode);
-  sessionIdByCode.delete(room.playerCode);
+  sessionIdByCode.delete(room.joinCode);
 }
 
 function cleanupExpiredRooms() {
@@ -135,39 +133,30 @@ function cleanupRoomIfEmpty(sessionId: string) {
 
 function registerRoom(
   sessionId: string,
-  hostCode: string,
-  playerCode: string,
+  joinCode: string,
 ): VillageSignalRoom {
   cleanupExpiredRooms();
   const room = roomsBySessionId.get(sessionId) ?? {
     sessionId,
     displayClientId: null,
-    hostCode,
-    playerCode,
+    joinCode,
     createdAt: Date.now(),
     lastSeenAt: Date.now(),
     connections: new Map<string, SignalConnection>(),
     disconnectTimers: new Map<string, number>(),
   };
 
-  if (room.hostCode !== hostCode) {
-    sessionIdByCode.delete(room.hostCode);
-    room.hostCode = hostCode;
-  }
-
-  if (room.playerCode !== playerCode) {
-    sessionIdByCode.delete(room.playerCode);
-    room.playerCode = playerCode;
+  if (room.joinCode !== joinCode) {
+    sessionIdByCode.delete(room.joinCode);
+    room.joinCode = joinCode;
   }
 
   room.lastSeenAt = Date.now();
-  sessionIdByCode.set(hostCode, sessionId);
-  sessionIdByCode.set(playerCode, sessionId);
+  sessionIdByCode.set(joinCode, sessionId);
   roomsBySessionId.set(sessionId, room);
   logSignal("room_registered", {
     sessionId,
-    hostCode: redact(hostCode),
-    playerCode: redact(playerCode),
+    joinCode: redact(joinCode),
     connections: room.connections.size,
   });
   return room;
@@ -243,23 +232,6 @@ function scheduleRemoveConnection(
   });
 }
 
-function closeExistingHost(room: VillageSignalRoom, nextClientId: string) {
-  for (const connection of room.connections.values()) {
-    if (
-      connection.kind === "controller" && connection.role === "host" &&
-      connection.clientId !== nextClientId
-    ) {
-      logSignal("host_replaced", {
-        sessionId: room.sessionId,
-        previousClientId: connection.clientId,
-        nextClientId,
-      });
-      connection.socket.close(4000, "Replaced by a new host");
-      room.connections.delete(connection.clientId);
-    }
-  }
-}
-
 function resolveControllerRoom(code: string) {
   cleanupExpiredRooms();
   const sessionId = sessionIdByCode.get(code);
@@ -277,7 +249,7 @@ function resolveControllerRoom(code: string) {
   }
 
   room.lastSeenAt = Date.now();
-  const role: ControllerRole = room.hostCode === code ? "host" : "player";
+  const role: ControllerRole = "player";
   logSignal("controller_room_resolved", {
     code: redact(code),
     sessionId,
@@ -331,21 +303,19 @@ export const handler = define.handlers({
 
     if (kind === "display") {
       const sessionId = url.searchParams.get("session")?.trim() ?? "";
-      const hostCode = url.searchParams.get("hostCode")?.trim() ?? "";
-      const playerCode = url.searchParams.get("playerCode")?.trim() ?? "";
-      if (!sessionId || !hostCode || !playerCode) {
+      const joinCode = url.searchParams.get("code")?.trim() ?? "";
+      if (!sessionId || !joinCode) {
         logSignal("display_rejected_missing_params", {
           sessionId,
-          hasHostCode: Boolean(hostCode),
-          hasPlayerCode: Boolean(playerCode),
+          hasJoinCode: Boolean(joinCode),
         });
         return makeErrorResponse(
-          "Expected session, hostCode, and playerCode.",
+          "Expected session and code.",
           400,
         );
       }
 
-      const room = registerRoom(sessionId, hostCode, playerCode);
+      const room = registerRoom(sessionId, joinCode);
       const { socket, response } = Deno.upgradeWebSocket(ctx.req);
       const existing = room.connections.get(clientId);
       if (existing) {
@@ -400,10 +370,9 @@ export const handler = define.handlers({
           logSignal("display_register_room_message", {
             clientId,
             sessionId: payload.sessionId,
-            hostCode: redact(payload.hostCode),
-            playerCode: redact(payload.playerCode),
+            joinCode: redact(payload.joinCode),
           });
-          registerRoom(payload.sessionId, payload.hostCode, payload.playerCode);
+          registerRoom(payload.sessionId, payload.joinCode);
           return;
         }
 
@@ -472,8 +441,6 @@ export const handler = define.handlers({
       });
       existing.socket.close(4000, "Replaced by a new connection");
     }
-    if (role === "host") closeExistingHost(room, clientId);
-
     socket.addEventListener("open", () => {
       clearDisconnectTimer(room, clientId);
       room.connections.set(clientId, {
