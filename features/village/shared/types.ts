@@ -92,6 +92,31 @@ export interface GameStartedPlayer {
   isDebug?: boolean;
 }
 
+export interface VillageGameSettings {
+  practiceBotCount: number;
+  playerSize: number;
+  playerAcceleration: number;
+  playerSpeedInputLimit: number;
+  playerDrag: number;
+  bumpKnockback: number;
+  bumpDrag: number;
+  bumpDurationMs: number;
+  bumpHit: number;
+  wallRestitution: number;
+  playerCollisionRestitution: number;
+  wallMomentumExtensionMs: number;
+  playerCollisionExtensionMs: number;
+  winningScore: number;
+  correctPointsPerSecond: number;
+  incorrectPointsPerSecond: number;
+  pointAccelerationPerSecond: number;
+  worldPadding: number;
+  maxZones: number;
+  initialZoneLimit: number;
+  maxZoneLimitReachedAtSeconds: number;
+  zoneSpeed: number;
+}
+
 export interface GameStartedEnvelope {
   kind: "game_started";
   players: GameStartedPlayer[];

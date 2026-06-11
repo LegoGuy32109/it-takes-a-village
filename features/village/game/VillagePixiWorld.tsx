@@ -1,12 +1,17 @@
 import { useEffect, useRef } from "preact/hooks";
 import type { Ticker } from "pixi.js";
-import { GameStartedPlayer, VillagePlayerInput } from "../shared/types.ts";
+import {
+  GameStartedPlayer,
+  VillageGameSettings,
+  VillagePlayerInput,
+} from "../shared/types.ts";
 
 interface VillagePixiWorldProps {
   players: GameStartedPlayer[];
   connectedPlayerIds: Set<string>;
   inputsRef: { current: Map<string, VillagePlayerInput> };
   debugKeyboardPlayerId: string | null;
+  settings: VillageGameSettings;
   onReturnToLobby: () => void;
   onBumpHit: (participantId: string, hitCount: number) => void;
   onGameResult: (winnerParticipantId: string) => void;
@@ -29,7 +34,6 @@ interface RenderedPlayer {
   facingY: number;
   lastActionPressed: boolean;
   nextBumpAtMs: number;
-  stunUntilMs: number;
   attackStartedAtMs: number;
   attackVisibleUntilMs: number;
   attackAngle: number;
@@ -55,43 +59,17 @@ interface TriviaZone {
   isCorrect: boolean;
 }
 
-const PLAYER_SIZE = 34;
 const PLAYER_BORDER_SIZE = 2;
-const PLAYER_RADIUS = PLAYER_SIZE / 2;
-const PLAYER_TOP_SPEED_PX_PER_SECOND = 250;
-const PLAYER_ACCELERATION_PX_PER_SECOND_SQUARED = 1800;
-const PLAYER_DRAG_PER_SECOND = 1.1;
-const STUN_MOVEMENT_SCALE = 0.3;
-const BUMP_COOLDOWN_MS = 1000;
-const BUMP_STUN_MS = 400;
-const BUMP_KNOCKBACK_PX_PER_SECOND = 1350;
-const BUMP_KNOCKBACK_DRAG_PER_SECOND = 1.1;
-const BUMP_KNOCKBACK_TOP_SPEED_PX_PER_SECOND = 1350;
-const BUMP_KNOCKBACK_DURATION_MS = 900;
-const BUMP_HIT_RADIUS = PLAYER_RADIUS * 3.25;
-const WALL_RESTITUTION = 0.82;
-const PLAYER_COLLISION_RESTITUTION = 0.9;
-const WALL_MOMENTUM_EXTENSION_MS = 450;
-const PLAYER_COLLISION_MOMENTUM_EXTENSION_MS = 250;
 const BUMP_VISUAL_HIT_WINDOW_MS = 100;
 const BUMP_VISUAL_FADE_MS = 150;
 const BUMP_COOLDOWN_BAR_ALPHA = 0.16;
 const LABEL_LIMIT = 12;
-const WINNING_SCORE = 1000;
-const CORRECT_POINTS_PER_SECOND = 20;
-const INCORRECT_POINTS_PER_SECOND = -40;
-const POINT_ACCELERATION_PER_SECOND = 0.01;
-const WORLD_PADDING = 24;
 const ROOM_BACKGROUND = "#ffe9ee";
 const ROOM_STRIPE = "#ffdce5";
 const STRIPE_WIDTH = 20;
 const STRIPE_SPACING = 72;
-const MAX_ZONES = 8;
-const INITIAL_ZONE_LIMIT = 2;
-const MAX_ZONE_LIMIT_AT_SECONDS = 90;
 const INITIAL_SPAWN_INTERVAL_SECONDS = 5;
 const MIN_SPAWN_INTERVAL_SECONDS = 2;
-const ZONE_SPEED = 58;
 const DIAGONAL_ZONE_SPEED_MULTIPLIER = 1.5;
 const WIN_SCREEN_DELAY_MS = 2000;
 const LOBBY_RETURN_COUNTDOWN_SECONDS = 5;
@@ -467,11 +445,13 @@ function darkenColor(color: number): number {
 function drawPlayerBody(
   body: import("pixi.js").Graphics,
   color: number,
+  playerSize: number,
+  playerBorderSize: number,
 ) {
   const borderColor = darkenColor(color);
-  const innerSize = PLAYER_SIZE - PLAYER_BORDER_SIZE * 2;
+  const innerSize = playerSize - playerBorderSize * 2;
   body.clear()
-    .rect(-PLAYER_SIZE / 2, -PLAYER_SIZE / 2, PLAYER_SIZE, PLAYER_SIZE)
+    .rect(-playerSize / 2, -playerSize / 2, playerSize, playerSize)
     .fill(borderColor)
     .rect(-innerSize / 2, -innerSize / 2, innerSize, innerSize)
     .fill(color);
@@ -480,6 +460,7 @@ function drawPlayerBody(
 function drawCooldownOverlay(
   graphics: import("pixi.js").Graphics,
   remainingRatio: number,
+  playerSize: number,
 ) {
   graphics.clear();
   if (remainingRatio <= 0) {
@@ -490,12 +471,12 @@ function drawCooldownOverlay(
   graphics.visible = true;
   graphics.alpha = 1;
   const clampedRatio = clamp(remainingRatio, 0, 1);
-  const barHeight = Math.max(1, PLAYER_SIZE * clampedRatio);
-  const barX = -PLAYER_SIZE / 2;
-  const barY = PLAYER_SIZE / 2 - barHeight;
+  const barHeight = Math.max(1, playerSize * clampedRatio);
+  const barX = -playerSize / 2;
+  const barY = playerSize / 2 - barHeight;
 
   graphics
-    .rect(barX, barY, PLAYER_SIZE, barHeight)
+    .rect(barX, barY, playerSize, barHeight)
     .fill({ color: 0x303030, alpha: BUMP_COOLDOWN_BAR_ALPHA });
 }
 
@@ -503,6 +484,7 @@ function drawAttackOverlay(
   graphics: import("pixi.js").Graphics,
   color: number,
   alpha: number,
+  playerRadius: number,
 ) {
   graphics.clear();
   if (alpha <= 0) {
@@ -512,17 +494,17 @@ function drawAttackOverlay(
 
   graphics.visible = true;
   graphics.alpha = alpha;
-  const crescentCenterX = PLAYER_RADIUS * 1.25;
-  const outerRadius = PLAYER_RADIUS * 1.7;
-  const innerRadius = PLAYER_RADIUS * 1.28;
+  const crescentCenterX = playerRadius * 1.25;
+  const outerRadius = playerRadius * 1.7;
+  const innerRadius = playerRadius * 1.28;
   const arcStart = -Math.PI * 0.58;
   const arcEnd = Math.PI * 0.58;
 
   graphics
     .arc(crescentCenterX, 0, outerRadius, arcStart, arcEnd)
-    .stroke({ color, width: PLAYER_RADIUS * 0.16, alpha: 0.22 })
+    .stroke({ color, width: playerRadius * 0.16, alpha: 0.22 })
     .arc(crescentCenterX, 0, innerRadius, arcStart, arcEnd)
-    .stroke({ color, width: PLAYER_RADIUS * 0.22, alpha: 0.9 });
+    .stroke({ color, width: playerRadius * 0.22, alpha: 0.9 });
 }
 
 function drawDashedRect(
@@ -577,16 +559,24 @@ function getSpawnPoint(
   };
 }
 
-function getZoneLimit(elapsedSeconds: number): number {
+function getZoneLimit(
+  elapsedSeconds: number,
+  maxZones: number,
+  initialZoneLimit: number,
+  maxZoneLimitReachedAtSeconds: number,
+): number {
   return Math.min(
-    MAX_ZONES,
-    INITIAL_ZONE_LIMIT +
-      Math.floor(elapsedSeconds / (MAX_ZONE_LIMIT_AT_SECONDS / 6)),
+    maxZones,
+    initialZoneLimit +
+      Math.floor(elapsedSeconds / (maxZoneLimitReachedAtSeconds / 6)),
   );
 }
 
-function getSpawnInterval(elapsedSeconds: number): number {
-  const progress = Math.min(1, elapsedSeconds / MAX_ZONE_LIMIT_AT_SECONDS);
+function getSpawnInterval(
+  elapsedSeconds: number,
+  maxZoneLimitReachedAtSeconds: number,
+): number {
+  const progress = Math.min(1, elapsedSeconds / maxZoneLimitReachedAtSeconds);
   return INITIAL_SPAWN_INTERVAL_SECONDS -
     (INITIAL_SPAWN_INTERVAL_SECONDS - MIN_SPAWN_INTERVAL_SECONDS) * progress;
 }
@@ -614,11 +604,34 @@ export function VillagePixiWorld(
     connectedPlayerIds,
     inputsRef,
     debugKeyboardPlayerId,
+    settings,
     onReturnToLobby,
     onBumpHit,
     onGameResult,
   }: VillagePixiWorldProps,
 ) {
+  const playerSize = settings.playerSize;
+  const playerRadius = playerSize / 2;
+  const playerAcceleration = settings.playerAcceleration;
+  const playerSpeedInputLimit = settings.playerSpeedInputLimit;
+  const playerDrag = settings.playerDrag;
+  const bumpKnockback = settings.bumpKnockback;
+  const bumpDrag = settings.bumpDrag;
+  const bumpDurationMs = settings.bumpDurationMs;
+  const bumpHitRadius = playerRadius * settings.bumpHit;
+  const wallRestitution = settings.wallRestitution;
+  const playerCollisionRestitution = settings.playerCollisionRestitution;
+  const wallMomentumExtensionMs = settings.wallMomentumExtensionMs;
+  const playerCollisionExtensionMs = settings.playerCollisionExtensionMs;
+  const winningScore = settings.winningScore;
+  const correctPointsPerSecond = settings.correctPointsPerSecond;
+  const incorrectPointsPerSecond = settings.incorrectPointsPerSecond;
+  const pointAccelerationPerSecond = settings.pointAccelerationPerSecond;
+  const worldPadding = settings.worldPadding;
+  const maxZones = settings.maxZones;
+  const initialZoneLimit = settings.initialZoneLimit;
+  const maxZoneLimitReachedAtSeconds = settings.maxZoneLimitReachedAtSeconds;
+  const zoneSpeed = settings.zoneSpeed;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const keyboardKeysRef = useRef(new Set<string>());
   const keyboardActionPressedRef = useRef(false);
@@ -799,17 +812,17 @@ export function VillagePixiWorld(
             .rect(0, 0, width, height)
             .fill("#ffffff")
             .rect(
-              WORLD_PADDING,
-              WORLD_PADDING,
-              Math.max(0, width - WORLD_PADDING * 2),
-              Math.max(0, height - WORLD_PADDING * 2),
+              worldPadding,
+              worldPadding,
+              Math.max(0, width - worldPadding * 2),
+              Math.max(0, height - worldPadding * 2),
             )
             .fill(ROOM_BACKGROUND);
 
-          const worldLeft = WORLD_PADDING;
-          const worldTop = WORLD_PADDING;
-          const worldRight = width - WORLD_PADDING;
-          const worldBottom = height - WORLD_PADDING;
+          const worldLeft = worldPadding;
+          const worldTop = worldPadding;
+          const worldRight = width - worldPadding;
+          const worldBottom = height - worldPadding;
           for (
             let stripeX = worldLeft - height;
             stripeX < worldRight;
@@ -830,13 +843,13 @@ export function VillagePixiWorld(
           }
 
           border.clear()
-            .rect(0, 0, width, WORLD_PADDING)
+            .rect(0, 0, width, worldPadding)
             .fill("#ffffff")
-            .rect(0, height - WORLD_PADDING, width, WORLD_PADDING)
+            .rect(0, height - worldPadding, width, worldPadding)
             .fill("#ffffff")
-            .rect(0, 0, WORLD_PADDING, height)
+            .rect(0, 0, worldPadding, height)
             .fill("#ffffff")
-            .rect(width - WORLD_PADDING, 0, WORLD_PADDING, height)
+            .rect(width - worldPadding, 0, worldPadding, height)
             .fill("#ffffff");
 
           if (winnerText) {
@@ -859,7 +872,7 @@ export function VillagePixiWorld(
         }
 
         function spawnZone() {
-          if (!app || !zoneLayer || gameEnded || zones.length >= MAX_ZONES) {
+          if (!app || !zoneLayer || gameEnded || zones.length >= maxZones) {
             return;
           }
           const width = app.renderer.width;
@@ -882,7 +895,7 @@ export function VillagePixiWorld(
           const direction =
             directions[Math.floor(Math.random() * directions.length)];
           const isDiagonal = direction.x !== 0 && direction.y !== 0;
-          const speed = ZONE_SPEED *
+          const speed = zoneSpeed *
             (isDiagonal ? DIAGONAL_ZONE_SPEED_MULTIPLIER : 1);
           const length = Math.hypot(direction.x, direction.y);
           const velocityX = direction.x / length * speed;
@@ -891,14 +904,14 @@ export function VillagePixiWorld(
             ? -zoneWidth
             : direction.x < 0
             ? width
-            : WORLD_PADDING + Math.random() *
-                Math.max(0, width - WORLD_PADDING * 2 - zoneWidth);
+            : worldPadding + Math.random() *
+                Math.max(0, width - worldPadding * 2 - zoneWidth);
           const y = direction.y > 0
             ? -zoneHeight
             : direction.y < 0
             ? height
-            : WORLD_PADDING + Math.random() *
-                Math.max(0, height - WORLD_PADDING * 2 - zoneHeight);
+            : worldPadding + Math.random() *
+                Math.max(0, height - worldPadding * 2 - zoneHeight);
 
           const body = new Graphics();
           drawZoneBody(body, zoneWidth, zoneHeight, color);
@@ -950,10 +963,18 @@ export function VillagePixiWorld(
           if (!app || gameEnded) return;
           elapsedSeconds += deltaSeconds;
           nextSpawnInSeconds -= deltaSeconds;
-          const zoneLimit = getZoneLimit(elapsedSeconds);
+          const zoneLimit = getZoneLimit(
+            elapsedSeconds,
+            maxZones,
+            initialZoneLimit,
+            maxZoneLimitReachedAtSeconds,
+          );
           if (nextSpawnInSeconds <= 0 && zones.length < zoneLimit) {
             spawnZone();
-            nextSpawnInSeconds = getSpawnInterval(elapsedSeconds);
+            nextSpawnInSeconds = getSpawnInterval(
+              elapsedSeconds,
+              maxZoneLimitReachedAtSeconds,
+            );
           }
 
           const width = app.renderer.width;
@@ -1025,13 +1046,13 @@ export function VillagePixiWorld(
             return;
           }
           const acceleration = 1 +
-            elapsedSeconds * POINT_ACCELERATION_PER_SECOND;
+            elapsedSeconds * pointAccelerationPerSecond;
           let velocity = 0;
-          const tolerance = PLAYER_SIZE / 4 - 0.5;
-          const playerLeft = player.x - PLAYER_SIZE / 2 + tolerance;
-          const playerRight = player.x + PLAYER_SIZE / 2 - tolerance;
-          const playerTop = player.y - PLAYER_SIZE / 2 + tolerance;
-          const playerBottom = player.y + PLAYER_SIZE / 2 - tolerance;
+          const tolerance = playerSize / 4 - 0.5;
+          const playerLeft = player.x - playerSize / 2 + tolerance;
+          const playerRight = player.x + playerSize / 2 - tolerance;
+          const playerTop = player.y - playerSize / 2 + tolerance;
+          const playerBottom = player.y + playerSize / 2 - tolerance;
 
           for (const zone of zones) {
             if (
@@ -1049,8 +1070,8 @@ export function VillagePixiWorld(
               continue;
             }
             velocity += zone.isCorrect
-              ? CORRECT_POINTS_PER_SECOND * acceleration
-              : INCORRECT_POINTS_PER_SECOND * acceleration;
+              ? correctPointsPerSecond * acceleration
+              : incorrectPointsPerSecond * acceleration;
           }
 
           if (velocity === 0) return;
@@ -1062,7 +1083,7 @@ export function VillagePixiWorld(
           player.scoreLabel.text = nextScore > 0
             ? `${Math.round(nextScore)}`
             : "";
-          if (nextScore >= WINNING_SCORE) {
+          if (nextScore >= winningScore) {
             player.scoreLabel.style.fill = "#ffd84d";
             endGame(player);
           }
@@ -1086,16 +1107,20 @@ export function VillagePixiWorld(
 
         function refreshCooldownOverlay(player: RenderedPlayer, nowMs: number) {
           if (nowMs >= player.nextBumpAtMs) {
-            drawCooldownOverlay(player.cooldownOverlay, 0);
+            drawCooldownOverlay(player.cooldownOverlay, 0, playerSize);
             return;
           }
 
           const remainingRatio = clamp(
-            (player.nextBumpAtMs - nowMs) / BUMP_COOLDOWN_MS,
+            (player.nextBumpAtMs - nowMs) / bumpDurationMs,
             0,
             1,
           );
-          drawCooldownOverlay(player.cooldownOverlay, remainingRatio);
+          drawCooldownOverlay(
+            player.cooldownOverlay,
+            remainingRatio,
+            playerSize,
+          );
         }
 
         function beginBumpAttack(player: RenderedPlayer, nowMs: number) {
@@ -1107,13 +1132,18 @@ export function VillagePixiWorld(
             : direction;
           const hits: RenderedPlayer[] = [];
 
-          player.nextBumpAtMs = nowMs + BUMP_COOLDOWN_MS;
+          player.nextBumpAtMs = nowMs + bumpDurationMs;
           player.attackStartedAtMs = nowMs;
           player.attackVisibleUntilMs = nowMs + BUMP_VISUAL_HIT_WINDOW_MS +
             BUMP_VISUAL_FADE_MS;
           player.attackAngle = Math.atan2(attackDirection.y, attackDirection.x);
           player.attackOverlay.rotation = player.attackAngle;
-          drawAttackOverlay(player.attackOverlay, player.color, 1);
+          drawAttackOverlay(
+            player.attackOverlay,
+            player.color,
+            1,
+            playerRadius,
+          );
 
           for (const target of renderedPlayersRef.current.values()) {
             if (target.id === player.id) continue;
@@ -1121,7 +1151,7 @@ export function VillagePixiWorld(
             const offsetX = target.x - player.x;
             const offsetY = target.y - player.y;
             const distance = vectorLength(offsetX, offsetY);
-            if (distance > BUMP_HIT_RADIUS + PLAYER_RADIUS) continue;
+            if (distance > bumpHitRadius + playerRadius) continue;
 
             const targetDirection = distance > 0
               ? normalizeVector(offsetX, offsetY)
@@ -1136,7 +1166,7 @@ export function VillagePixiWorld(
 
             hits.push(target);
             const alignment = clamp(forwardDot, 0, 1);
-            const distanceFactor = 1 - clamp(distance / BUMP_HIT_RADIUS, 0, 1);
+            const distanceFactor = 1 - clamp(distance / bumpHitRadius, 0, 1);
             const lateralDirection = {
               x: targetDirection.x - attackDirection.x * forwardDot,
               y: targetDirection.y - attackDirection.y * forwardDot,
@@ -1151,7 +1181,7 @@ export function VillagePixiWorld(
                 y: lateralDirection.y / lateralLength,
               }
               : { x: 0, y: 0 };
-            const launchSpeed = BUMP_KNOCKBACK_PX_PER_SECOND *
+            const launchSpeed = bumpKnockback *
               (0.72 + alignment * 0.55 + distanceFactor * 0.4);
             const sidePush = (1 - alignment) * launchSpeed * 0.42;
 
@@ -1163,11 +1193,7 @@ export function VillagePixiWorld(
               normalizedLateral.y * sidePush;
             target.knockbackUntilMs = Math.max(
               target.knockbackUntilMs,
-              nowMs + BUMP_KNOCKBACK_DURATION_MS,
-            );
-            target.stunUntilMs = Math.max(
-              target.stunUntilMs,
-              nowMs + BUMP_STUN_MS + BUMP_KNOCKBACK_DURATION_MS / 2,
+              nowMs + bumpDurationMs,
             );
           }
 
@@ -1194,7 +1220,6 @@ export function VillagePixiWorld(
           const inputDirection = inputMagnitude > 0
             ? normalizeVector(inputX, inputY)
             : { x: 0, y: 0 };
-          const stunned = nowMs < player.stunUntilMs;
           const knockbackActive = nowMs < player.knockbackUntilMs;
 
           if (inputMagnitude > 0) {
@@ -1208,71 +1233,70 @@ export function VillagePixiWorld(
           player.lastActionPressed = Boolean(input?.action_pressed);
 
           if (inputMagnitude > 0) {
-            const steeringScale = stunned ? STUN_MOVEMENT_SCALE : 1;
-            const acceleration = PLAYER_ACCELERATION_PX_PER_SECOND_SQUARED *
-              steeringScale *
-              inputMagnitude;
+            const speedAlongInput = vectorDot(
+              player.velocityX,
+              player.velocityY,
+              inputDirection.x,
+              inputDirection.y,
+            );
+            const accelerationScale = clamp(
+              (playerSpeedInputLimit - speedAlongInput) /
+                playerSpeedInputLimit,
+              0,
+              1,
+            );
+            const acceleration = playerAcceleration *
+              inputMagnitude *
+              accelerationScale;
             player.velocityX += inputDirection.x * acceleration * deltaSeconds;
             player.velocityY += inputDirection.y * acceleration * deltaSeconds;
           }
 
           const drag = Math.exp(
-            -(knockbackActive
-              ? BUMP_KNOCKBACK_DRAG_PER_SECOND
-              : PLAYER_DRAG_PER_SECOND) * deltaSeconds,
+            -(knockbackActive ? bumpDrag : playerDrag) * deltaSeconds,
           );
           player.velocityX *= drag;
           player.velocityY *= drag;
 
-          const speed = vectorLength(player.velocityX, player.velocityY);
-          const topSpeed = knockbackActive
-            ? BUMP_KNOCKBACK_TOP_SPEED_PX_PER_SECOND
-            : PLAYER_TOP_SPEED_PX_PER_SECOND;
-          if (speed > topSpeed) {
-            const clamped = topSpeed / speed;
-            player.velocityX *= clamped;
-            player.velocityY *= clamped;
-          }
-
           player.x += player.velocityX * deltaSeconds;
           player.y += player.velocityY * deltaSeconds;
 
-          const minX = WORLD_PADDING + PLAYER_RADIUS;
-          const minY = WORLD_PADDING + PLAYER_RADIUS;
-          const maxX = (app?.renderer.width ?? 0) - WORLD_PADDING -
-            PLAYER_RADIUS;
-          const maxY = (app?.renderer.height ?? 0) - WORLD_PADDING -
-            PLAYER_RADIUS;
+          const minX = worldPadding + playerRadius;
+          const minY = worldPadding + playerRadius;
+          const maxX = (app?.renderer.width ?? 0) - worldPadding -
+            playerRadius;
+          const maxY = (app?.renderer.height ?? 0) - worldPadding -
+            playerRadius;
 
           if (player.x < minX) {
             player.x = minX;
-            player.velocityX = Math.abs(player.velocityX) * WALL_RESTITUTION;
+            player.velocityX = Math.abs(player.velocityX) * wallRestitution;
             player.knockbackUntilMs = Math.max(
               player.knockbackUntilMs,
-              nowMs + WALL_MOMENTUM_EXTENSION_MS,
+              nowMs + wallMomentumExtensionMs,
             );
           } else if (player.x > maxX) {
             player.x = maxX;
-            player.velocityX = -Math.abs(player.velocityX) * WALL_RESTITUTION;
+            player.velocityX = -Math.abs(player.velocityX) * wallRestitution;
             player.knockbackUntilMs = Math.max(
               player.knockbackUntilMs,
-              nowMs + WALL_MOMENTUM_EXTENSION_MS,
+              nowMs + wallMomentumExtensionMs,
             );
           }
 
           if (player.y < minY) {
             player.y = minY;
-            player.velocityY = Math.abs(player.velocityY) * WALL_RESTITUTION;
+            player.velocityY = Math.abs(player.velocityY) * wallRestitution;
             player.knockbackUntilMs = Math.max(
               player.knockbackUntilMs,
-              nowMs + WALL_MOMENTUM_EXTENSION_MS,
+              nowMs + wallMomentumExtensionMs,
             );
           } else if (player.y > maxY) {
             player.y = maxY;
-            player.velocityY = -Math.abs(player.velocityY) * WALL_RESTITUTION;
+            player.velocityY = -Math.abs(player.velocityY) * wallRestitution;
             player.knockbackUntilMs = Math.max(
               player.knockbackUntilMs,
-              nowMs + WALL_MOMENTUM_EXTENSION_MS,
+              nowMs + wallMomentumExtensionMs,
             );
           }
         }
@@ -1296,7 +1320,7 @@ export function VillagePixiWorld(
                 const deltaX = right.x - left.x;
                 const deltaY = right.y - left.y;
                 const distance = vectorLength(deltaX, deltaY);
-                const minDistance = PLAYER_SIZE;
+                const minDistance = playerSize;
                 if (distance >= minDistance) continue;
 
                 const normal = distance > 0
@@ -1325,7 +1349,7 @@ export function VillagePixiWorld(
                 );
                 if (velocityAlongNormal > 0) continue;
 
-                const impulseMagnitude = -(1 + PLAYER_COLLISION_RESTITUTION) *
+                const impulseMagnitude = -(1 + playerCollisionRestitution) *
                   velocityAlongNormal / 2;
                 const impulseX = collisionNormal.x * impulseMagnitude;
                 const impulseY = collisionNormal.y * impulseMagnitude;
@@ -1335,22 +1359,22 @@ export function VillagePixiWorld(
                 right.velocityY += impulseY;
                 left.knockbackUntilMs = Math.max(
                   left.knockbackUntilMs,
-                  nowMs + PLAYER_COLLISION_MOMENTUM_EXTENSION_MS,
+                  nowMs + playerCollisionExtensionMs,
                 );
                 right.knockbackUntilMs = Math.max(
                   right.knockbackUntilMs,
-                  nowMs + PLAYER_COLLISION_MOMENTUM_EXTENSION_MS,
+                  nowMs + playerCollisionExtensionMs,
                 );
               }
             }
           }
 
-          const minX = WORLD_PADDING + PLAYER_RADIUS;
-          const minY = WORLD_PADDING + PLAYER_RADIUS;
-          const maxX = (app?.renderer.width ?? 0) - WORLD_PADDING -
-            PLAYER_RADIUS;
-          const maxY = (app?.renderer.height ?? 0) - WORLD_PADDING -
-            PLAYER_RADIUS;
+          const minX = worldPadding + playerRadius;
+          const minY = worldPadding + playerRadius;
+          const maxX = (app?.renderer.width ?? 0) - worldPadding -
+            playerRadius;
+          const maxY = (app?.renderer.height ?? 0) - worldPadding -
+            playerRadius;
           for (const player of players) {
             player.x = clamp(player.x, minX, maxX);
             player.y = clamp(player.y, minY, maxY);
@@ -1387,9 +1411,19 @@ export function VillagePixiWorld(
               existing.label.text = displayLabel(player.name);
               if (existing.color !== player.color) {
                 existing.color = player.color;
-                drawPlayerBody(existing.body, player.color);
-                drawCooldownOverlay(existing.cooldownOverlay, 0);
-                drawAttackOverlay(existing.attackOverlay, player.color, 0);
+                drawPlayerBody(
+                  existing.body,
+                  player.color,
+                  playerSize,
+                  PLAYER_BORDER_SIZE,
+                );
+                drawCooldownOverlay(existing.cooldownOverlay, 0, playerSize);
+                drawAttackOverlay(
+                  existing.attackOverlay,
+                  player.color,
+                  0,
+                  playerRadius,
+                );
               }
               existing.isDebug = Boolean(player.isDebug);
               return;
@@ -1402,11 +1436,11 @@ export function VillagePixiWorld(
               app.renderer.height,
             );
             const body = new Graphics();
-            drawPlayerBody(body, player.color);
+            drawPlayerBody(body, player.color, playerSize, PLAYER_BORDER_SIZE);
             const cooldownOverlay = new Graphics();
-            drawCooldownOverlay(cooldownOverlay, 0);
+            drawCooldownOverlay(cooldownOverlay, 0, playerSize);
             const attackOverlay = new Graphics();
-            drawAttackOverlay(attackOverlay, player.color, 0);
+            drawAttackOverlay(attackOverlay, player.color, 0, playerRadius);
             const label = new Text({
               text: displayLabel(player.name),
               style: {
@@ -1451,7 +1485,6 @@ export function VillagePixiWorld(
               facingY: -1,
               lastActionPressed: false,
               nextBumpAtMs: 0,
-              stunUntilMs: 0,
               attackStartedAtMs: 0,
               attackVisibleUntilMs: 0,
               attackAngle: -Math.PI / 2,
@@ -1468,9 +1501,9 @@ export function VillagePixiWorld(
             rendered.attackOverlay.x = rendered.x;
             rendered.attackOverlay.y = rendered.y;
             rendered.label.x = rendered.x;
-            rendered.label.y = rendered.y - PLAYER_SIZE / 2 - 6;
+            rendered.label.y = rendered.y - playerSize / 2 - 6;
             rendered.scoreLabel.x = rendered.x;
-            rendered.scoreLabel.y = rendered.y + PLAYER_SIZE / 2 + 5;
+            rendered.scoreLabel.y = rendered.y + playerSize / 2 + 5;
             refreshAttackOverlay(rendered, nowMs);
             refreshCooldownOverlay(rendered, nowMs);
           }
@@ -1483,12 +1516,12 @@ export function VillagePixiWorld(
           drawBackground();
           for (const rendered of renderedPlayersRef.current.values()) {
             rendered.x = Math.min(
-              Math.max(WORLD_PADDING + PLAYER_SIZE / 2, rendered.x),
-              app!.renderer.width - WORLD_PADDING - PLAYER_SIZE / 2,
+              Math.max(worldPadding + playerSize / 2, rendered.x),
+              app!.renderer.width - worldPadding - playerSize / 2,
             );
             rendered.y = Math.min(
-              Math.max(WORLD_PADDING + PLAYER_SIZE / 2, rendered.y),
-              app!.renderer.height - WORLD_PADDING - PLAYER_SIZE / 2,
+              Math.max(worldPadding + playerSize / 2, rendered.y),
+              app!.renderer.height - worldPadding - playerSize / 2,
             );
           }
         });
@@ -1518,9 +1551,9 @@ export function VillagePixiWorld(
             rendered.attackOverlay.x = rendered.x;
             rendered.attackOverlay.y = rendered.y;
             rendered.label.x = rendered.x;
-            rendered.label.y = rendered.y - PLAYER_SIZE / 2 - 6;
+            rendered.label.y = rendered.y - playerSize / 2 - 6;
             rendered.scoreLabel.x = rendered.x;
-            rendered.scoreLabel.y = rendered.y + PLAYER_SIZE / 2 + 5;
+            rendered.scoreLabel.y = rendered.y + playerSize / 2 + 5;
             if (winnerId !== rendered.id) {
               rendered.scoreLabel.style.fill = "#514158";
             }

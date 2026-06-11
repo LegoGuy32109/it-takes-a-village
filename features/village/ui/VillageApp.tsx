@@ -30,6 +30,7 @@ import {
   SignalServerMessage,
   SnapshotEnvelope,
   VillageClientRole,
+  VillageGameSettings,
   VillagePlayerInput,
   VillageSnapshot,
   VillageState,
@@ -42,6 +43,7 @@ interface VillageAppProps {
 
 const PARTICIPANT_ID_STORAGE_KEY = "village:participant-id";
 const PARTICIPANT_NAME_STORAGE_KEY = "village:participant-name";
+const GAME_SETTINGS_STORAGE_KEY = "village:game-settings";
 const DEBUG_LOCAL_PLAYER_ID = "debug-local-player";
 const DEBUG_LOCAL_PLAYER_NAME = "Player";
 const PLAYER_COLORS = [
@@ -51,11 +53,237 @@ const PLAYER_COLORS = [
   0xd6fbe4,
   0xfcfdcd,
 ];
-const DEBUG_BOT_COUNT = 5;
 const PEER_DISCONNECT_GRACE_MS = 5000;
 const TRANSIENT_ERROR_VISIBILITY_MS = 2500;
 const HEALTH_PING_INTERVAL_MS = 2500;
 const HEALTH_TIMEOUT_MS = 60_000;
+
+const DEFAULT_GAME_SETTINGS: VillageGameSettings = {
+  practiceBotCount: 5,
+  playerSize: 34,
+  playerAcceleration: 1800,
+  playerSpeedInputLimit: 250,
+  playerDrag: 1.1,
+  bumpKnockback: 1350,
+  bumpDrag: 1.1,
+  bumpDurationMs: 900,
+  bumpHit: 3.25,
+  wallRestitution: 0.82,
+  playerCollisionRestitution: 0.9,
+  wallMomentumExtensionMs: 450,
+  playerCollisionExtensionMs: 250,
+  winningScore: 1000,
+  correctPointsPerSecond: 20,
+  incorrectPointsPerSecond: -40,
+  pointAccelerationPerSecond: 0.01,
+  worldPadding: 24,
+  maxZones: 8,
+  initialZoneLimit: 2,
+  maxZoneLimitReachedAtSeconds: 90,
+  zoneSpeed: 58,
+};
+
+type GameSettingKey = keyof VillageGameSettings;
+
+interface GameSettingSpec {
+  key: GameSettingKey;
+  label: string;
+  description: string;
+  min: number;
+  max: number;
+  step: number;
+  integer?: boolean;
+  unit?: string;
+}
+
+const GAME_SETTING_SPECS: GameSettingSpec[] = [
+  {
+    key: "practiceBotCount",
+    label: "PRACTICE_BOTS",
+    description: "How many practice bots fill out the match.",
+    min: 0,
+    max: 12,
+    step: 1,
+    integer: true,
+  },
+  {
+    key: "playerSize",
+    label: "PLAYER_SIZE",
+    description: "Size of the player square in pixels.",
+    min: 16,
+    max: 96,
+    step: 1,
+    integer: true,
+  },
+  {
+    key: "playerAcceleration",
+    label: "PLAYER_ACCELERATION",
+    description: "How fast joystick input adds speed.",
+    min: 100,
+    max: 5000,
+    step: 25,
+  },
+  {
+    key: "playerSpeedInputLimit",
+    label: "PLAYER_SPEED_INPUT_LIMIT",
+    description: "How much input can add once moving fast in that direction.",
+    min: 0,
+    max: 1000,
+    step: 10,
+  },
+  {
+    key: "playerDrag",
+    label: "PLAYER_DRAG",
+    description: "Baseline drag applied to player movement.",
+    min: 0,
+    max: 5,
+    step: 0.01,
+  },
+  {
+    key: "bumpKnockback",
+    label: "BUMP_KNOCKBACK",
+    description: "Impulse strength when a bump connects.",
+    min: 0,
+    max: 5000,
+    step: 25,
+  },
+  {
+    key: "bumpDrag",
+    label: "BUMP_DRAG",
+    description: "Drag applied while knockback momentum is active.",
+    min: 0,
+    max: 5,
+    step: 0.01,
+  },
+  {
+    key: "bumpDurationMs",
+    label: "BUMP_DURATION",
+    description: "Cooldown before the same player can bump again.",
+    min: 100,
+    max: 5000,
+    step: 25,
+    integer: true,
+  },
+  {
+    key: "bumpHit",
+    label: "BUMP_HIT",
+    description: "Hit radius multiplier off the player size.",
+    min: 0.5,
+    max: 8,
+    step: 0.05,
+  },
+  {
+    key: "wallRestitution",
+    label: "WALL_RESTITUTION",
+    description: "How bouncy room edges are.",
+    min: 0,
+    max: 1,
+    step: 0.01,
+  },
+  {
+    key: "playerCollisionRestitution",
+    label: "PLAYER_COLLISION_RESTITUTION",
+    description: "How bouncy player-player collisions are.",
+    min: 0,
+    max: 1,
+    step: 0.01,
+  },
+  {
+    key: "wallMomentumExtensionMs",
+    label: "WALL_MOMENTUM_EXTENSION",
+    description: "How long wall hits keep momentum boosted.",
+    min: 0,
+    max: 3000,
+    step: 25,
+    integer: true,
+  },
+  {
+    key: "playerCollisionExtensionMs",
+    label: "PLAYER_COLLISION_EXTENSION",
+    description: "How long player bumps keep momentum boosted.",
+    min: 0,
+    max: 3000,
+    step: 25,
+    integer: true,
+  },
+  {
+    key: "winningScore",
+    label: "WINNING_SCORE",
+    description: "Score required to end the round.",
+    min: 1,
+    max: 10000,
+    step: 25,
+    integer: true,
+  },
+  {
+    key: "correctPointsPerSecond",
+    label: "CORRECT_PPS",
+    description: "Points gained per second on correct trivia.",
+    min: 0,
+    max: 200,
+    step: 1,
+  },
+  {
+    key: "incorrectPointsPerSecond",
+    label: "INCORRECT_PPS",
+    description: "Points lost per second on incorrect trivia.",
+    min: -200,
+    max: 0,
+    step: 1,
+  },
+  {
+    key: "pointAccelerationPerSecond",
+    label: "POINT_ACCELERATION",
+    description: "How quickly scoring ramps as the round runs.",
+    min: 0,
+    max: 0.1,
+    step: 0.001,
+  },
+  {
+    key: "worldPadding",
+    label: "WORLD_PADDING",
+    description: "Padding around the playable room.",
+    min: 0,
+    max: 200,
+    step: 1,
+    integer: true,
+  },
+  {
+    key: "maxZones",
+    label: "MAX_ZONES",
+    description: "Maximum number of trivia zones on screen.",
+    min: 0,
+    max: 32,
+    step: 1,
+    integer: true,
+  },
+  {
+    key: "initialZoneLimit",
+    label: "INITIAL_ZONE_LIMIT",
+    description: "How many zones can exist at the start.",
+    min: 0,
+    max: 16,
+    step: 1,
+    integer: true,
+  },
+  {
+    key: "maxZoneLimitReachedAtSeconds",
+    label: "MAX_ZONE_LIMIT_REACHED",
+    description: "When the zone limit reaches its cap.",
+    min: 10,
+    max: 300,
+    step: 5,
+    integer: true,
+  },
+  {
+    key: "zoneSpeed",
+    label: "ZONE_SPEED",
+    description: "Base speed of trivia zones.",
+    min: 0,
+    max: 300,
+    step: 1,
+  },
+];
 
 function createSessionId(): string {
   return crypto.randomUUID().split("-")[0];
@@ -97,6 +325,45 @@ function writeStoredValue(key: string, value: string) {
     globalThis.localStorage.setItem(key, value);
   } catch {
     // localStorage can fail in restricted browsing modes.
+  }
+}
+
+function coerceGameSettingValue(
+  value: unknown,
+  fallback: number,
+  integer = false,
+): number {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return integer ? Math.round(numeric) : numeric;
+}
+
+function defaultGameSettings(): VillageGameSettings {
+  return { ...DEFAULT_GAME_SETTINGS };
+}
+
+function sanitizeGameSettings(
+  input: Partial<VillageGameSettings>,
+): VillageGameSettings {
+  const settings = defaultGameSettings();
+  for (const spec of GAME_SETTING_SPECS) {
+    settings[spec.key] = coerceGameSettingValue(
+      input[spec.key],
+      DEFAULT_GAME_SETTINGS[spec.key],
+      Boolean(spec.integer),
+    );
+  }
+  return settings;
+}
+
+function readGameSettings(): VillageGameSettings {
+  try {
+    const raw = readStoredValue(GAME_SETTINGS_STORAGE_KEY);
+    if (!raw) return defaultGameSettings();
+    const parsed = JSON.parse(raw) as Partial<VillageGameSettings>;
+    return sanitizeGameSettings(parsed);
+  } catch {
+    return defaultGameSettings();
   }
 }
 
@@ -257,8 +524,9 @@ function signalPayloadKind(
 
 function createDebugPracticePlayers(
   existingPlayers: Map<string, GameStartedPlayer>,
+  practiceBotCount: number,
 ): GameStartedPlayer[] {
-  return Array.from({ length: DEBUG_BOT_COUNT }, (_, index) => {
+  return Array.from({ length: practiceBotCount }, (_, index) => {
     const id = `debug-bot-${index + 1}`;
     return existingPlayers.get(id) ?? {
       id,
@@ -308,6 +576,10 @@ export default function VillageApp(
   const [signalStatus, setSignalStatus] = useState("Idle");
   const [transportError, setTransportError] = useState("");
   const [connectionDetail, setConnectionDetail] = useState("");
+  const [gameSettings, setGameSettings] = useState<VillageGameSettings>(() =>
+    readGameSettings()
+  );
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [controllerSnapshot, setControllerSnapshot] = useState<
     VillageSnapshot | null
   >(null);
@@ -464,6 +736,14 @@ export default function VillageApp(
     if (!booted) return;
     writeStoredValue(PARTICIPANT_NAME_STORAGE_KEY, participantName);
   }, [booted, participantName]);
+
+  useEffect(() => {
+    if (!booted || !isDisplayMode) return;
+    writeStoredValue(
+      GAME_SETTINGS_STORAGE_KEY,
+      JSON.stringify(gameSettings),
+    );
+  }, [booted, gameSettings, isDisplayMode]);
 
   useEffect(() => {
     if (!booted || !isDisplayMode) return;
@@ -845,13 +1125,17 @@ export default function VillageApp(
         color: colorForParticipant(participant.id),
       }
     );
-    const debugPlayers = createDebugPracticePlayers(existingPlayers);
+    const debugPlayers = createDebugPracticePlayers(
+      existingPlayers,
+      gameSettings.practiceBotCount,
+    );
     const rosterForGame = [...playersForGame, ...debugPlayers];
 
     debugLog("game_start", {
       playerCount: rosterForGame.length,
       participantIds: rosterForGame.map((player) => shortId(player.id)),
       debugBotCount: debugPlayers.length,
+      bumpDurationMs: gameSettings.bumpDurationMs,
     });
     setDebugGameActive(false);
     gamePlayersRef.current = rosterForGame;
@@ -876,7 +1160,10 @@ export default function VillageApp(
       }
     );
     const localPlayer = createDebugLocalPlayer(existingPlayers);
-    const debugPlayers = createDebugPracticePlayers(existingPlayers);
+    const debugPlayers = createDebugPracticePlayers(
+      existingPlayers,
+      gameSettings.practiceBotCount,
+    );
     const rosterForGame = [localPlayer, ...playersForGame, ...debugPlayers];
 
     debugLog("debug_game_start", {
@@ -884,6 +1171,7 @@ export default function VillageApp(
       participantIds: rosterForGame.map((player) => shortId(player.id)),
       debugBotCount: debugPlayers.length,
       localPlayerId: shortId(localPlayer.id),
+      bumpDurationMs: gameSettings.bumpDurationMs,
     });
     gamePlayersRef.current = rosterForGame;
     setGamePlayers(rosterForGame);
@@ -1925,6 +2213,19 @@ export default function VillageApp(
     });
   }
 
+  function updateGameSetting(key: GameSettingKey, value: number) {
+    if (!Number.isFinite(value)) return;
+    const spec = GAME_SETTING_SPECS.find((entry) => entry.key === key);
+    setGameSettings((current) => ({
+      ...current,
+      [key]: spec?.integer ? Math.round(value) : value,
+    }));
+  }
+
+  function resetGameSettings() {
+    setGameSettings(defaultGameSettings());
+  }
+
   if (!booted) {
     return <div class="min-h-screen bg-[#fff7fb]" />;
   }
@@ -1942,6 +2243,7 @@ export default function VillageApp(
           connectedPlayerIds={connectedPlayerIds}
           inputsRef={gameInputsRef}
           debugKeyboardPlayerId={debugGameActive ? DEBUG_LOCAL_PLAYER_ID : null}
+          settings={gameSettings}
           onReturnToLobby={returnToLobbyFromDisplay}
           onBumpHit={sendBumpHitToController}
           onGameResult={broadcastGameResult}
@@ -1952,7 +2254,27 @@ export default function VillageApp(
     return (
       <main class="min-h-screen bg-[#fff7fb] text-[#514158]">
         <div class="mx-auto flex min-h-screen max-w-7xl flex-col gap-6 px-5 py-6">
-          <header class="rounded-[2rem] border border-[#f3ccd9] bg-[#ffe2ec] px-6 py-5 shadow-sm">
+          <header class="relative rounded-[2rem] border border-[#f3ccd9] bg-[#ffe2ec] px-6 py-5 shadow-sm">
+            <button
+              type="button"
+              onClick={() => setSettingsOpen(true)}
+              class="absolute right-4 top-4 rounded-full border border-[#d7c1d7] bg-white/85 p-3 text-[#6d4d73] shadow-sm transition hover:bg-white"
+              aria-label="Open game settings"
+            >
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 24 24"
+                class="h-5 w-5"
+                fill="none"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="1.9"
+              >
+                <path d="M10.25 4.5h3.5l.55 2.04a6.9 6.9 0 0 1 1.58.92l2.07-.83 1.75 3.03-1.77 1.45a6.8 6.8 0 0 1 0 1.84l1.77 1.45-1.75 3.03-2.07-.83a6.9 6.9 0 0 1-1.58.92l-.55 2.04h-3.5l-.55-2.04a6.9 6.9 0 0 1-1.58-.92l-2.07.83-1.75-3.03 1.77-1.45a6.8 6.8 0 0 1 0-1.84L4.3 10.66l1.75-3.03 2.07.83a6.9 6.9 0 0 1 1.58-.92l.55-2.04Z" />
+                <circle cx="12" cy="12" r="2.6" />
+              </svg>
+            </button>
             <p class="text-sm font-semibold uppercase tracking-[0.32em] text-[#a06d85]">
               baby kitchen party room
             </p>
@@ -1962,8 +2284,8 @@ export default function VillageApp(
                   It Takes a Village
                 </h1>
                 <p class="mt-2 max-w-2xl text-lg text-[#765c72]">
-                  Gather the helpers, stock the nursery, and get ready for cozy
-                  chaos.
+                  Move around, bump helpers into each other, and shove them into
+                  the edges of the room.
                 </p>
               </div>
               <div class="rounded-2xl bg-white/75 px-4 py-3 text-right">
@@ -1985,7 +2307,33 @@ export default function VillageApp(
 
           <section class="grid flex-1 gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
             <div class="rounded-[2rem] border border-[#d8e8d5] bg-[#e9f7e6] p-6 shadow-sm">
-              <div class="grid gap-4 md:grid-cols-2">
+              <div class="rounded-[1.75rem] border border-[#bfdac3] bg-[#f4fff0] p-5">
+                <p class="text-xs font-bold uppercase tracking-[0.28em] text-[#628168]">
+                  How to Play
+                </p>
+                <div class="mt-4 grid gap-4 md:grid-cols-3">
+                  <div class="rounded-2xl border border-[#dcebd7] bg-white/85 p-4">
+                    <p class="text-lg font-black text-[#52627d]">1. Join</p>
+                    <p class="mt-1 text-sm text-[#667285]">
+                      Share the join code so helpers can connect to the room.
+                    </p>
+                  </div>
+                  <div class="rounded-2xl border border-[#dcebd7] bg-white/85 p-4">
+                    <p class="text-lg font-black text-[#52627d]">2. Start</p>
+                    <p class="mt-1 text-sm text-[#667285]">
+                      Press Space on the display to start a practice match.
+                    </p>
+                  </div>
+                  <div class="rounded-2xl border border-[#dcebd7] bg-white/85 p-4">
+                    <p class="text-lg font-black text-[#52627d]">3. Bump</p>
+                    <p class="mt-1 text-sm text-[#667285]">
+                      Use WASD to move and Space to bump opponents around.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="mt-4 grid gap-4 md:grid-cols-2">
                 <div class="rounded-3xl border border-[#cfe2ff] bg-[#eef6ff] p-5">
                   <p class="text-xs font-bold uppercase tracking-[0.28em] text-[#667fa3]">
                     Host
@@ -2010,7 +2358,7 @@ export default function VillageApp(
                     {players.length}
                   </p>
                   <p class="mt-2 text-sm text-[#7b6b4d]">
-                    Players appear here after they enter a name.
+                    Helpers appear here after they enter a name.
                   </p>
                 </div>
               </div>
@@ -2062,6 +2410,121 @@ export default function VillageApp(
             </aside>
           </section>
         </div>
+        {settingsOpen && (
+          <div
+            class="fixed inset-0 z-40 flex items-center justify-center bg-[#514158]/35 px-4 py-6 backdrop-blur-sm"
+            onClick={() => setSettingsOpen(false)}
+          >
+            <section
+              class="w-full max-w-2xl rounded-[2rem] border border-[#d7c1d7] bg-[#fffdfc] p-6 shadow-2xl"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div class="flex items-start justify-between gap-4">
+                <div>
+                  <p class="text-xs font-bold uppercase tracking-[0.3em] text-[#a06d85]">
+                    Game Settings
+                  </p>
+                  <h2 class="mt-2 text-3xl font-black tracking-tight text-[#6d4d73]">
+                    Tune the practice match
+                  </h2>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSettingsOpen(false)}
+                  class="rounded-full border border-[#e7c8d5] bg-white px-4 py-2 text-sm font-bold text-[#6d4d73] transition hover:bg-[#fff7fb]"
+                >
+                  Close
+                </button>
+              </div>
+
+              <p class="mt-4 max-w-2xl text-sm text-[#806d7b]">
+                These settings change the next debug match started from the
+                lobby. Use the number box for exact values and the slider for
+                quick tuning.
+              </p>
+
+              <div class="mt-6 max-h-[60vh] overflow-y-auto pr-1">
+                <div class="space-y-4">
+                  {GAME_SETTING_SPECS.map((spec) => {
+                    const value = gameSettings[spec.key];
+                    const valueLabel = spec.unit
+                      ? `${value}${spec.unit}`
+                      : String(value);
+                    return (
+                      <label
+                        key={spec.key}
+                        class="block rounded-3xl border border-[#e7d4b7] bg-[#fffaf2] p-5"
+                      >
+                        <div class="flex flex-wrap items-end justify-between gap-4">
+                          <div>
+                            <p class="text-xs font-bold uppercase tracking-[0.24em] text-[#9b7b36]">
+                              {spec.label}
+                            </p>
+                            <p class="mt-2 text-sm text-[#7b6b4d]">
+                              {spec.description}
+                            </p>
+                          </div>
+                          <input
+                            type="number"
+                            step={spec.step}
+                            value={value}
+                            onInput={(event) =>
+                              updateGameSetting(
+                                spec.key,
+                                Number(
+                                  (event.currentTarget as HTMLInputElement)
+                                    .value,
+                                ),
+                              )}
+                            class="h-12 w-28 rounded-2xl border border-[#e0caa2] bg-white px-3 text-right text-lg font-black text-[#806230] outline-none focus:border-[#b88934]"
+                          />
+                        </div>
+                        <div class="mt-4 flex items-center gap-3">
+                          <input
+                            type="range"
+                            min={spec.min}
+                            max={spec.max}
+                            step={spec.step}
+                            value={value}
+                            onInput={(event) =>
+                              updateGameSetting(
+                                spec.key,
+                                Number(
+                                  (event.currentTarget as HTMLInputElement)
+                                    .value,
+                                ),
+                              )}
+                            class="h-3 flex-1 cursor-pointer appearance-none rounded-full bg-[#f3d8a8] accent-[#b88934]"
+                          />
+                          <span class="min-w-20 text-right text-xs font-semibold uppercase tracking-[0.18em] text-[#9f8b62]">
+                            {valueLabel}
+                          </span>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div class="mt-6 flex flex-wrap items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={resetGameSettings}
+                  class="rounded-full border border-[#e7c8d5] bg-white px-5 py-3 text-sm font-bold text-[#6d4d73] transition hover:bg-[#fff7fb]"
+                >
+                  Reset to default
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSettingsOpen(false)}
+                  class="rounded-full bg-[#b8d8c0] px-5 py-3 text-sm font-black text-[#385443] transition hover:bg-[#a7cfae]"
+                >
+                  Done
+                </button>
+              </div>
+            </section>
+          </div>
+        )}
       </main>
     );
   }
