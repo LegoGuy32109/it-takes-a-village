@@ -4,7 +4,9 @@ import { VillagePlayerInput } from "../shared/types.ts";
 interface VillageControllerProps {
   name: string;
   signalStatus: string;
+  connectionDetail: string;
   onInput: (input: VillagePlayerInput) => void;
+  onDisconnect: () => void;
 }
 
 const JOYSTICK_RADIUS = 74;
@@ -12,7 +14,8 @@ const KNOB_RADIUS = 28;
 const SEND_INTERVAL_MS = 50;
 
 export function VillageController(
-  { name, signalStatus, onInput }: VillageControllerProps,
+  { name, signalStatus, connectionDetail, onInput, onDisconnect }:
+    VillageControllerProps,
 ) {
   const joystickRef = useRef<HTMLDivElement | null>(null);
   const pointerIdRef = useRef<number | null>(null);
@@ -172,6 +175,11 @@ export function VillageController(
         <div class="rounded-full border border-[#efd0ef] bg-white/85 px-4 py-2 text-center shadow-sm">
           <p class="text-sm font-black text-[#6d4d73]">{name || "Helper"}</p>
           <p class="text-xs font-semibold text-[#806d7b]">{signalStatus}</p>
+          {connectionDetail && (
+            <p class="max-w-48 text-[0.68rem] font-semibold text-[#947f91]">
+              {connectionDetail}
+            </p>
+          )}
         </div>
         <button
           type="button"
@@ -179,6 +187,13 @@ export function VillageController(
           class="rounded-full border border-[#cfe2ff] bg-[#eef6ff]/95 px-4 py-3 text-sm font-black text-[#52627d] shadow-sm"
         >
           Full Screen
+        </button>
+        <button
+          type="button"
+          onClick={onDisconnect}
+          class="rounded-full border border-[#f0b9ad] bg-[#ffe5df]/95 px-4 py-3 text-sm font-black text-[#875548] shadow-sm"
+        >
+          Disconnect
         </button>
       </div>
 

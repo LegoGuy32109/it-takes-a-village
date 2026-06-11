@@ -36,6 +36,8 @@ const PLAYER_COLORS = [
   0xd6fbe4,
   0xfcfdcd,
 ];
+const PEER_DISCONNECT_GRACE_MS = 5000;
+const TRANSIENT_ERROR_VISIBILITY_MS = 2500;
 
 function createSessionId(): string {
   return crypto.randomUUID().split("-")[0];
@@ -246,7 +248,7 @@ export default function VillageApp(
   const [displayState, setDisplayState] = useState<VillageState>(
     PLACEHOLDER_DISPLAY_STATE,
   );
-  const [participantId] = useState(() => {
+  const [participantId, setParticipantId] = useState(() => {
     if (typeof globalThis.localStorage === "undefined") return "pending";
     const stored = readStoredValue(PARTICIPANT_ID_STORAGE_KEY);
     if (stored) return stored;
@@ -258,11 +260,13 @@ export default function VillageApp(
   const [draftName, setDraftName] = useState("");
   const [signalStatus, setSignalStatus] = useState("Idle");
   const [transportError, setTransportError] = useState("");
+  const [connectionDetail, setConnectionDetail] = useState("");
   const [controllerSnapshot, setControllerSnapshot] = useState<
     VillageSnapshot | null
   >(null);
   const [resolvedRole, setResolvedRole] = useState<ControllerRole | null>(null);
   const [connectAttempt, setConnectAttempt] = useState(0);
+  const [controllerSanitized, setControllerSanitized] = useState(false);
   const [gamePhase, setGamePhase] = useState<"lobby" | "playing">("lobby");
   const [gamePlayers, setGamePlayers] = useState<GameStartedPlayer[]>([]);
 
@@ -284,6 +288,9 @@ export default function VillageApp(
   );
   const gameStateRef = useRef(displayState);
   const reconnectTimerRef = useRef<number | null>(null);
+  const peerDisconnectTimersRef = useRef(new Map<string, number>());
+  const transportErrorTimerRef = useRef<number | null>(null);
+  const connectionEpochRef = useRef(0);
   const isDisplayMode = mode === "display";
 
   function debugLog(event: string, fields: Record<string, unknown> = {}) {
@@ -370,6 +377,12 @@ export default function VillageApp(
       if (reconnectTimerRef.current !== null) {
         globalThis.clearTimeout(reconnectTimerRef.current);
       }
+      if (transportErrorTimerRef.current !== null) {
+        globalThis.clearTimeout(transportErrorTimerRef.current);
+      }
+      for (const timer of peerDisconnectTimersRef.current.values()) {
+        globalThis.clearTimeout(timer);
+      }
       signalSocketRef.current?.close();
       for (const channel of peerChannelsRef.current.values()) channel.close();
       for (const connection of peerConnectionsRef.current.values()) {
@@ -406,6 +419,151 @@ export default function VillageApp(
   const players = displaySnapshot.participants.filter((participant) =>
     participant.role === "player"
   );
+
+  function clearVisibleTransportError() {
+    if (transportErrorTimerRef.current !== null) {
+      globalThis.clearTimeout(transportErrorTimerRef.current);
+      transportErrorTimerRef.current = null;
+    }
+    setTransportError("");
+  }
+
+  function clearTransientConnectionDetail() {
+    setConnectionDetail(
+      iceServers.length === 0
+        ? "No ICE servers configured; direct network path only."
+        : "",
+    );
+  }
+
+  function reportTransportDiagnostic(
+    message: string,
+    fields: Record<string, unknown> = {},
+    options: { showImmediately?: boolean } = {},
+  ) {
+    debugLog("transport_diagnostic", { message, ...fields });
+    setConnectionDetail(message);
+
+    if (options.showImmediately) {
+      clearVisibleTransportError();
+      setTransportError(message);
+      return;
+    }
+
+    if (transportErrorTimerRef.current !== null) {
+      globalThis.clearTimeout(transportErrorTimerRef.current);
+    }
+    const epoch = connectionEpochRef.current;
+    transportErrorTimerRef.current = globalThis.setTimeout(() => {
+      if (connectionEpochRef.current === epoch) {
+        setTransportError(message);
+      }
+      transportErrorTimerRef.current = null;
+    }, TRANSIENT_ERROR_VISIBILITY_MS);
+  }
+
+  function clearPeerDisconnectTimer(peerId: string) {
+    const timer = peerDisconnectTimersRef.current.get(peerId);
+    if (timer === undefined) return;
+    globalThis.clearTimeout(timer);
+    peerDisconnectTimersRef.current.delete(peerId);
+  }
+
+  function isActivePeerConnection(
+    peerId: string,
+    connection: RTCPeerConnection,
+    epoch: number,
+  ): boolean {
+    return connectionEpochRef.current === epoch &&
+      peerConnectionsRef.current.get(peerId) === connection &&
+      connection.signalingState !== "closed";
+  }
+
+  function schedulePeerCleanup(
+    peerId: string,
+    connection: RTCPeerConnection,
+    reason: string,
+  ) {
+    clearPeerDisconnectTimer(peerId);
+    const epoch = connectionEpochRef.current;
+    const timer = globalThis.setTimeout(() => {
+      peerDisconnectTimersRef.current.delete(peerId);
+      if (!isActivePeerConnection(peerId, connection, epoch)) return;
+      debugLog("peer_cleanup_after_grace", {
+        peerId: shortId(peerId),
+        reason,
+        graceMs: PEER_DISCONNECT_GRACE_MS,
+      });
+      cleanupPeer(peerId);
+    }, PEER_DISCONNECT_GRACE_MS);
+    peerDisconnectTimersRef.current.set(peerId, timer);
+    debugLog("peer_cleanup_scheduled", {
+      peerId: shortId(peerId),
+      reason,
+      graceMs: PEER_DISCONNECT_GRACE_MS,
+    });
+  }
+
+  function sanitizeControllerConnection() {
+    if (isDisplayMode) return;
+
+    debugLog("controller_disconnect_requested", {
+      previousClientId: shortId(clientIdRef.current),
+      channelCount: peerChannelsRef.current.size,
+      peerConnectionCount: peerConnectionsRef.current.size,
+    });
+
+    connectionEpochRef.current += 1;
+    clientIdRef.current = createClientId();
+    const nextParticipantId = crypto.randomUUID();
+    setParticipantId(nextParticipantId);
+    writeStoredValue(PARTICIPANT_ID_STORAGE_KEY, nextParticipantId);
+
+    if (reconnectTimerRef.current !== null) {
+      globalThis.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    if (transportErrorTimerRef.current !== null) {
+      globalThis.clearTimeout(transportErrorTimerRef.current);
+      transportErrorTimerRef.current = null;
+    }
+    for (const timer of peerDisconnectTimersRef.current.values()) {
+      globalThis.clearTimeout(timer);
+    }
+    peerDisconnectTimersRef.current.clear();
+
+    signalSocketRef.current?.close();
+    signalSocketRef.current = null;
+    for (const channel of peerChannelsRef.current.values()) channel.close();
+    for (const connection of peerConnectionsRef.current.values()) {
+      connection.close();
+    }
+
+    peerChannelsRef.current.clear();
+    peerConnectionsRef.current.clear();
+    peerParticipantIdsRef.current.clear();
+    participantPeerIdsRef.current.clear();
+    peerRolesRef.current.clear();
+    pendingCandidatesRef.current.clear();
+    setControllerSnapshot(null);
+    setResolvedRole(null);
+    resolvedRoleRef.current = null;
+    setGamePhase("lobby");
+    setTransportError("");
+    setConnectionDetail(
+      "Client state cleared. Scan the display QR code again.",
+    );
+    setSignalStatus("Disconnected");
+    setControllerSanitized(true);
+
+    try {
+      const url = new URL(globalThis.location.href);
+      url.searchParams.delete("code");
+      globalThis.history.replaceState(null, "", url);
+    } catch {
+      // URL cleanup is best-effort; the local connection state is already reset.
+    }
+  }
 
   function sendSignalMessage(message: SignalClientMessage) {
     const socket = signalSocketRef.current;
@@ -544,6 +702,7 @@ export default function VillageApp(
   }
 
   function cleanupPeer(clientId: string) {
+    clearPeerDisconnectTimer(clientId);
     debugLog("cleanup_peer", {
       peerId: shortId(clientId),
       hasConnection: peerConnectionsRef.current.has(clientId),
@@ -582,6 +741,7 @@ export default function VillageApp(
   }
 
   function attachChannelHandlers(peerId: string, channel: RTCDataChannel) {
+    const epoch = connectionEpochRef.current;
     debugLog("datachannel_attach", {
       peerId: shortId(peerId),
       label: channel.label,
@@ -590,6 +750,10 @@ export default function VillageApp(
     peerChannelsRef.current.set(peerId, channel);
 
     channel.addEventListener("open", () => {
+      if (connectionEpochRef.current !== epoch) return;
+      clearPeerDisconnectTimer(peerId);
+      clearVisibleTransportError();
+      clearTransientConnectionDetail();
       debugLog("datachannel_open", {
         peerId: shortId(peerId),
         label: channel.label,
@@ -611,6 +775,7 @@ export default function VillageApp(
     });
 
     channel.addEventListener("close", () => {
+      if (connectionEpochRef.current !== epoch) return;
       debugLog("datachannel_close", {
         peerId: shortId(peerId),
         label: channel.label,
@@ -619,10 +784,15 @@ export default function VillageApp(
       if (!isDisplayMode) {
         setSignalStatus("Waiting for display");
         setControllerSnapshot(null);
+        reportTransportDiagnostic("Realtime data channel closed.", {
+          peerId: shortId(peerId),
+          label: channel.label,
+        });
       }
     });
 
     channel.addEventListener("message", (event) => {
+      if (connectionEpochRef.current !== epoch) return;
       try {
         const payload = JSON.parse(String(event.data)) as
           | ControllerEnvelope
@@ -714,7 +884,9 @@ export default function VillageApp(
         }
       } catch {
         debugLog("datachannel_message_malformed", { peerId: shortId(peerId) });
-        setTransportError("Received malformed realtime data.");
+        reportTransportDiagnostic("Received malformed realtime data.", {
+          peerId: shortId(peerId),
+        }, { showImmediately: true });
       }
     });
   }
@@ -723,7 +895,9 @@ export default function VillageApp(
     peerId: string,
     connection: RTCPeerConnection,
     candidate: RTCIceCandidateInit,
+    epoch: number,
   ) {
+    if (!isActivePeerConnection(peerId, connection, epoch)) return;
     if (!connection.remoteDescription) {
       const candidates = pendingCandidatesRef.current.get(peerId) ?? [];
       candidates.push(candidate);
@@ -735,6 +909,7 @@ export default function VillageApp(
       });
       return;
     }
+    if (!isActivePeerConnection(peerId, connection, epoch)) return;
     debugLog("ice_candidate_add", {
       peerId: shortId(peerId),
       payloadKind: signalPayloadKind(candidate),
@@ -745,6 +920,7 @@ export default function VillageApp(
   async function flushPendingCandidates(
     peerId: string,
     connection: RTCPeerConnection,
+    epoch: number,
   ) {
     const candidates = pendingCandidatesRef.current.get(peerId) ?? [];
     pendingCandidatesRef.current.delete(peerId);
@@ -753,7 +929,16 @@ export default function VillageApp(
       count: candidates.length,
     });
     for (const candidate of candidates) {
-      await connection.addIceCandidate(candidate);
+      if (!isActivePeerConnection(peerId, connection, epoch)) return;
+      try {
+        await connection.addIceCandidate(candidate);
+      } catch (error) {
+        reportTransportDiagnostic("Failed to add queued ICE candidate.", {
+          peerId: shortId(peerId),
+          payloadKind: signalPayloadKind(candidate),
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
     }
   }
 
@@ -769,12 +954,14 @@ export default function VillageApp(
       peerId: shortId(targetClientId),
       iceServerCount: iceServers.length,
     });
+    const epoch = connectionEpochRef.current;
     const connection = new RTCPeerConnection({ iceServers });
     const channel = connection.createDataChannel("village-control", {
       ordered: true,
     });
 
     connection.addEventListener("icecandidate", (event) => {
+      if (!isActivePeerConnection(targetClientId, connection, epoch)) return;
       if (!event.candidate) {
         debugLog("display_ice_gathering_complete", {
           peerId: shortId(targetClientId),
@@ -792,6 +979,16 @@ export default function VillageApp(
       });
     });
 
+    connection.addEventListener("icecandidateerror", (event) => {
+      if (connectionEpochRef.current !== epoch) return;
+      reportTransportDiagnostic("ICE candidate gathering error.", {
+        peerId: shortId(targetClientId),
+        url: event.url,
+        errorCode: event.errorCode,
+        errorText: event.errorText,
+      });
+    });
+
     connection.addEventListener("connectionstatechange", () => {
       debugLog("display_peer_connection_state", {
         peerId: shortId(targetClientId),
@@ -801,8 +998,30 @@ export default function VillageApp(
         signalingState: connection.signalingState,
       });
       if (
+        connectionEpochRef.current !== epoch ||
+        peerConnectionsRef.current.get(targetClientId) !== connection
+      ) return;
+      if (connection.connectionState === "connected") {
+        clearPeerDisconnectTimer(targetClientId);
+        clearVisibleTransportError();
+        clearTransientConnectionDetail();
+        return;
+      }
+      if (connection.connectionState === "disconnected") {
+        reportTransportDiagnostic("Peer connection temporarily disconnected.", {
+          peerId: shortId(targetClientId),
+          connectionState: connection.connectionState,
+          iceConnectionState: connection.iceConnectionState,
+        });
+        schedulePeerCleanup(
+          targetClientId,
+          connection,
+          "connectionstate-disconnected",
+        );
+        return;
+      }
+      if (
         connection.connectionState === "failed" ||
-        connection.connectionState === "disconnected" ||
         connection.connectionState === "closed"
       ) {
         cleanupPeer(targetClientId);
@@ -833,20 +1052,34 @@ export default function VillageApp(
         });
         return offer;
       })
-      .then((offer) => connection.setLocalDescription(offer))
+      .then((offer) => {
+        if (!isActivePeerConnection(targetClientId, connection, epoch)) return;
+        return connection.setLocalDescription(offer);
+      })
       .then(() => {
-        if (!connection.localDescription) return;
+        if (
+          !connection.localDescription ||
+          !isActivePeerConnection(targetClientId, connection, epoch)
+        ) return;
         sendSignalMessage({
           type: "signal",
           targetClientId,
           payload: connection.localDescription.toJSON(),
         });
       })
-      .catch(() => {
+      .catch((error) => {
+        if (!isActivePeerConnection(targetClientId, connection, epoch)) return;
         debugLog("display_peer_connection_create_failed", {
           peerId: shortId(targetClientId),
         });
-        setTransportError("Failed to create a display peer connection.");
+        reportTransportDiagnostic(
+          "Failed to create a display peer connection.",
+          {
+            peerId: shortId(targetClientId),
+            error: error instanceof Error ? error.message : String(error),
+          },
+          { showImmediately: true },
+        );
         cleanupPeer(targetClientId);
       });
   }
@@ -864,10 +1097,12 @@ export default function VillageApp(
       peerId: shortId(displayClientId),
       iceServerCount: iceServers.length,
     });
+    const epoch = connectionEpochRef.current;
     const connection = new RTCPeerConnection({ iceServers });
     peerConnectionsRef.current.set(displayClientId, connection);
 
     connection.addEventListener("icecandidate", (event) => {
+      if (!isActivePeerConnection(displayClientId, connection, epoch)) return;
       if (!event.candidate) {
         debugLog("controller_ice_gathering_complete", {
           peerId: shortId(displayClientId),
@@ -885,6 +1120,16 @@ export default function VillageApp(
       });
     });
 
+    connection.addEventListener("icecandidateerror", (event) => {
+      if (connectionEpochRef.current !== epoch) return;
+      reportTransportDiagnostic("ICE candidate gathering error.", {
+        peerId: shortId(displayClientId),
+        url: event.url,
+        errorCode: event.errorCode,
+        errorText: event.errorText,
+      });
+    });
+
     connection.addEventListener("connectionstatechange", () => {
       debugLog("controller_peer_connection_state", {
         peerId: shortId(displayClientId),
@@ -894,8 +1139,30 @@ export default function VillageApp(
         signalingState: connection.signalingState,
       });
       if (
+        connectionEpochRef.current !== epoch ||
+        peerConnectionsRef.current.get(displayClientId) !== connection
+      ) return;
+      if (connection.connectionState === "connected") {
+        clearPeerDisconnectTimer(displayClientId);
+        clearVisibleTransportError();
+        clearTransientConnectionDetail();
+        return;
+      }
+      if (connection.connectionState === "disconnected") {
+        reportTransportDiagnostic("Peer connection temporarily disconnected.", {
+          peerId: shortId(displayClientId),
+          connectionState: connection.connectionState,
+          iceConnectionState: connection.iceConnectionState,
+        });
+        schedulePeerCleanup(
+          displayClientId,
+          connection,
+          "connectionstate-disconnected",
+        );
+        return;
+      }
+      if (
         connection.connectionState === "failed" ||
-        connection.connectionState === "disconnected" ||
         connection.connectionState === "closed"
       ) {
         cleanupPeer(displayClientId);
@@ -939,7 +1206,8 @@ export default function VillageApp(
             role: peer.role,
           })),
         });
-        setTransportError("");
+        clearVisibleTransportError();
+        clearTransientConnectionDetail();
         setSignalStatus(
           message.role === "display" ? "Room open" : "Signal ready",
         );
@@ -986,57 +1254,142 @@ export default function VillageApp(
             message.fromClientId,
           );
           if (!connection) return;
+          const epoch = connectionEpochRef.current;
           if (isSessionDescriptionPayload(message.payload)) {
             debugLog("display_apply_remote_description", {
               peerId: shortId(message.fromClientId),
               type: message.payload.type,
             });
             connection.setRemoteDescription(message.payload)
-              .then(() =>
-                flushPendingCandidates(message.fromClientId, connection)
-              )
-              .catch(() =>
-                setTransportError("Failed to apply controller answer.")
-              );
+              .then(() => {
+                if (
+                  !isActivePeerConnection(
+                    message.fromClientId,
+                    connection,
+                    epoch,
+                  )
+                ) return;
+                return flushPendingCandidates(
+                  message.fromClientId,
+                  connection,
+                  epoch,
+                );
+              })
+              .catch((error) => {
+                if (
+                  !isActivePeerConnection(
+                    message.fromClientId,
+                    connection,
+                    epoch,
+                  )
+                ) return;
+                reportTransportDiagnostic(
+                  "Failed to apply controller answer.",
+                  {
+                    peerId: shortId(message.fromClientId),
+                    signalingState: connection.signalingState,
+                    error: error instanceof Error
+                      ? error.message
+                      : String(error),
+                  },
+                );
+              });
             return;
           }
           addIceCandidateWhenReady(
             message.fromClientId,
             connection,
             message.payload,
-          ).catch(() => setTransportError("Failed to add controller ICE."));
+            epoch,
+          ).catch((error) =>
+            reportTransportDiagnostic("Failed to add controller ICE.", {
+              peerId: shortId(message.fromClientId),
+              payloadKind: signalPayloadKind(message.payload),
+              error: error instanceof Error ? error.message : String(error),
+            })
+          );
           return;
         }
 
         const connection = createControllerPeerConnection(message.fromClientId);
+        const epoch = connectionEpochRef.current;
         if (isSessionDescriptionPayload(message.payload)) {
           if (message.payload.type === "offer") {
             debugLog("controller_apply_offer", {
               peerId: shortId(message.fromClientId),
             });
             connection.setRemoteDescription(message.payload)
-              .then(() =>
-                flushPendingCandidates(message.fromClientId, connection)
-              )
-              .then(() => connection.createAnswer())
+              .then(() => {
+                if (
+                  !isActivePeerConnection(
+                    message.fromClientId,
+                    connection,
+                    epoch,
+                  )
+                ) return;
+                return flushPendingCandidates(
+                  message.fromClientId,
+                  connection,
+                  epoch,
+                );
+              })
+              .then(() => {
+                if (
+                  !isActivePeerConnection(
+                    message.fromClientId,
+                    connection,
+                    epoch,
+                  )
+                ) return;
+                return connection.createAnswer();
+              })
               .then((answer) => {
+                if (!answer) return;
                 debugLog("controller_answer_created", {
                   peerId: shortId(message.fromClientId),
                 });
                 return answer;
               })
-              .then((answer) => connection.setLocalDescription(answer))
+              .then((answer) => {
+                if (
+                  !answer ||
+                  !isActivePeerConnection(
+                    message.fromClientId,
+                    connection,
+                    epoch,
+                  )
+                ) return;
+                return connection.setLocalDescription(answer);
+              })
               .then(() => {
-                if (!connection.localDescription) return;
+                if (
+                  !connection.localDescription ||
+                  !isActivePeerConnection(
+                    message.fromClientId,
+                    connection,
+                    epoch,
+                  )
+                ) return;
                 sendSignalMessage({
                   type: "signal",
                   targetClientId: message.fromClientId,
                   payload: connection.localDescription.toJSON(),
                 });
               })
-              .catch(() =>
-                setTransportError("Failed to answer display offer.")
-              );
+              .catch((error) => {
+                if (
+                  !isActivePeerConnection(
+                    message.fromClientId,
+                    connection,
+                    epoch,
+                  )
+                ) return;
+                reportTransportDiagnostic("Failed to answer display offer.", {
+                  peerId: shortId(message.fromClientId),
+                  signalingState: connection.signalingState,
+                  error: error instanceof Error ? error.message : String(error),
+                });
+              });
             return;
           }
           debugLog("controller_apply_remote_description", {
@@ -1044,10 +1397,34 @@ export default function VillageApp(
             type: message.payload.type,
           });
           connection.setRemoteDescription(message.payload)
-            .then(() =>
-              flushPendingCandidates(message.fromClientId, connection)
-            )
-            .catch(() => setTransportError("Failed to apply display session."));
+            .then(() => {
+              if (
+                !isActivePeerConnection(
+                  message.fromClientId,
+                  connection,
+                  epoch,
+                )
+              ) return;
+              return flushPendingCandidates(
+                message.fromClientId,
+                connection,
+                epoch,
+              );
+            })
+            .catch((error) => {
+              if (
+                !isActivePeerConnection(
+                  message.fromClientId,
+                  connection,
+                  epoch,
+                )
+              ) return;
+              reportTransportDiagnostic("Failed to apply display session.", {
+                peerId: shortId(message.fromClientId),
+                signalingState: connection.signalingState,
+                error: error instanceof Error ? error.message : String(error),
+              });
+            });
           return;
         }
 
@@ -1055,28 +1432,44 @@ export default function VillageApp(
           message.fromClientId,
           connection,
           message.payload,
-        ).catch(() => setTransportError("Failed to add display ICE."));
+          epoch,
+        ).catch((error) =>
+          reportTransportDiagnostic("Failed to add display ICE.", {
+            peerId: shortId(message.fromClientId),
+            payloadKind: signalPayloadKind(message.payload),
+            error: error instanceof Error ? error.message : String(error),
+          })
+        );
         return;
       }
       case "error":
         debugLog("signal_error_message", { error: message.error });
-        setTransportError(message.error);
+        reportTransportDiagnostic(message.error, {}, { showImmediately: true });
         return;
     }
   }
 
   useEffect(() => {
-    if (!booted || (!isDisplayMode && !joinCode)) return;
+    if (!booted || (!isDisplayMode && (!joinCode || controllerSanitized))) {
+      return;
+    }
     let disposed = false;
+    connectionEpochRef.current += 1;
+    const epoch = connectionEpochRef.current;
 
     setSignalStatus("Connecting...");
-    setTransportError("");
+    clearVisibleTransportError();
+    clearTransientConnectionDetail();
 
     signalSocketRef.current?.close();
     for (const channel of peerChannelsRef.current.values()) channel.close();
     for (const connection of peerConnectionsRef.current.values()) {
       connection.close();
     }
+    for (const timer of peerDisconnectTimersRef.current.values()) {
+      globalThis.clearTimeout(timer);
+    }
+    peerDisconnectTimersRef.current.clear();
     peerChannelsRef.current.clear();
     peerConnectionsRef.current.clear();
     peerParticipantIdsRef.current.clear();
@@ -1108,10 +1501,18 @@ export default function VillageApp(
       code: joinCode ? `****${joinCode.slice(-2)}` : undefined,
       iceServerCount: iceServers.length,
     });
+    if (iceServers.length === 0) {
+      const detail = "No ICE servers configured; direct network path only.";
+      debugLog("transport_diagnostic", { message: detail });
+      setConnectionDetail(detail);
+    }
     const socket = new WebSocket(signalUrl);
     signalSocketRef.current = socket;
 
     socket.addEventListener("open", () => {
+      if (disposed || connectionEpochRef.current !== epoch) return;
+      clearVisibleTransportError();
+      clearTransientConnectionDetail();
       debugLog("websocket_open", {
         kind: isDisplayMode ? "display" : "controller",
       });
@@ -1127,22 +1528,30 @@ export default function VillageApp(
     });
 
     socket.addEventListener("message", (event) => {
+      if (disposed || connectionEpochRef.current !== epoch) return;
       debugLog("websocket_message", {
         dataType: typeof event.data,
         byteLength: typeof event.data === "string" ? event.data.length : null,
       });
       parseSignalMessageData(event.data)
         .then((message) => {
-          if (!disposed) handleSignalMessage(message);
+          if (!disposed && connectionEpochRef.current === epoch) {
+            handleSignalMessage(message);
+          }
         })
-        .catch(() =>
-          setTransportError("Realtime signaling returned invalid data.")
-        );
+        .catch((error) => {
+          if (disposed || connectionEpochRef.current !== epoch) return;
+          reportTransportDiagnostic(
+            "Realtime signaling returned invalid data.",
+            { error: error instanceof Error ? error.message : String(error) },
+            { showImmediately: true },
+          );
+        });
     });
 
     socket.addEventListener("close", () => {
       debugLog("websocket_close");
-      if (disposed) return;
+      if (disposed || connectionEpochRef.current !== epoch) return;
       setSignalStatus("Disconnected");
       if (!isDisplayMode) setControllerSnapshot(null);
       if (reconnectTimerRef.current !== null) {
@@ -1156,7 +1565,10 @@ export default function VillageApp(
 
     socket.addEventListener("error", () => {
       debugLog("websocket_error");
-      setTransportError("Realtime signaling failed.");
+      if (disposed || connectionEpochRef.current !== epoch) return;
+      reportTransportDiagnostic("Realtime signaling failed.", {
+        readyState: socket.readyState,
+      });
     });
 
     return () => {
@@ -1166,6 +1578,7 @@ export default function VillageApp(
   }, [
     booted,
     connectAttempt,
+    controllerSanitized,
     displayState.hostCode,
     displayState.playerCode,
     displayState.sessionId,
@@ -1258,6 +1671,11 @@ export default function VillageApp(
                   {displayState.sessionId}
                 </p>
                 <p class="text-sm text-[#8b7186]">{signalStatus}</p>
+                {connectionDetail && (
+                  <p class="mt-1 max-w-64 text-xs text-[#8b7186]">
+                    {connectionDetail}
+                  </p>
+                )}
               </div>
             </div>
           </header>
@@ -1367,12 +1785,37 @@ export default function VillageApp(
     Boolean(trimName(participantName)) &&
     openControllerChannelCount > 0;
 
+  if (controllerSanitized) {
+    return (
+      <main class="min-h-screen bg-[#fdf4ff] px-4 py-6 text-[#514158]">
+        <div class="mx-auto flex min-h-[calc(100vh-3rem)] max-w-xl items-center">
+          <section class="w-full rounded-[2rem] border border-[#f0b9ad] bg-white/85 p-6 text-center shadow-sm">
+            <p class="text-xs font-bold uppercase tracking-[0.32em] text-[#a06d85]">
+              Disconnected
+            </p>
+            <h1 class="mt-3 text-4xl font-black tracking-tight text-[#6d4d73]">
+              It Takes a Village
+            </h1>
+            <p class="mt-4 text-base font-semibold text-[#806d7b]">
+              Client state has been cleared.
+            </p>
+            <p class="mt-2 text-sm text-[#947f91]">
+              Scan the display QR code again to rejoin this lobby.
+            </p>
+          </section>
+        </div>
+      </main>
+    );
+  }
+
   if (gamePhase === "playing") {
     return (
       <VillageController
         name={displayGameName(controllerDisplayName)}
         signalStatus={signalStatus}
+        connectionDetail={connectionDetail}
         onInput={sendGameInput}
+        onDisconnect={sanitizeControllerConnection}
       />
     );
   }
@@ -1389,6 +1832,9 @@ export default function VillageApp(
           </h1>
           <p class="mt-2 text-sm text-[#806d7b]">Join code: {joinCode}</p>
           <p class="mt-1 text-sm text-[#806d7b]">{signalStatus}</p>
+          {connectionDetail && (
+            <p class="mt-1 text-xs text-[#947f91]">{connectionDetail}</p>
+          )}
 
           <form class="mt-6 space-y-3" onSubmit={submitName}>
             <label class="block text-sm font-bold text-[#6d4d73]" for="name">
@@ -1417,6 +1863,14 @@ export default function VillageApp(
               {transportError}
             </div>
           )}
+
+          <button
+            type="button"
+            onClick={sanitizeControllerConnection}
+            class="mt-4 h-12 w-full rounded-2xl border border-[#f0b9ad] bg-[#ffe5df] text-sm font-black text-[#875548] transition hover:bg-[#ffd8cf]"
+          >
+            Disconnect
+          </button>
         </section>
 
         {resolvedRole === "host" && (

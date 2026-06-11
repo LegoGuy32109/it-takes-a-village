@@ -23,9 +23,11 @@ interface VillageSignalRoom {
   createdAt: number;
   lastSeenAt: number;
   connections: Map<string, SignalConnection>;
+  disconnectTimers: Map<string, number>;
 }
 
 const ROOM_TTL_MS = 4 * 60 * 60 * 1000;
+const RECONNECT_GRACE_MS = 3500;
 const roomsBySessionId = new Map<string, VillageSignalRoom>();
 const sessionIdByCode = new Map<string, string>();
 
@@ -101,6 +103,8 @@ function deleteRoom(room: VillageSignalRoom) {
     sessionId: room.sessionId,
     connections: room.connections.size,
   });
+  for (const timer of room.disconnectTimers.values()) clearTimeout(timer);
+  room.disconnectTimers.clear();
   roomsBySessionId.delete(room.sessionId);
   sessionIdByCode.delete(room.hostCode);
   sessionIdByCode.delete(room.playerCode);
@@ -143,6 +147,7 @@ function registerRoom(
     createdAt: Date.now(),
     lastSeenAt: Date.now(),
     connections: new Map<string, SignalConnection>(),
+    disconnectTimers: new Map<string, number>(),
   };
 
   if (room.hostCode !== hostCode) {
@@ -168,25 +173,74 @@ function registerRoom(
   return room;
 }
 
-function removeConnection(sessionId: string, clientId: string) {
+function clearDisconnectTimer(room: VillageSignalRoom, clientId: string) {
+  const timer = room.disconnectTimers.get(clientId);
+  if (timer === undefined) return;
+  clearTimeout(timer);
+  room.disconnectTimers.delete(clientId);
+}
+
+function removeConnection(
+  sessionId: string,
+  clientId: string,
+  socket: WebSocket,
+  reason: string,
+) {
   const room = roomsBySessionId.get(sessionId);
   if (!room) return;
 
   const connection = room.connections.get(clientId);
   if (!connection) return;
+  if (connection.socket !== socket) {
+    logSignal("connection_remove_skipped_stale_socket", {
+      sessionId,
+      clientId,
+      kind: connection.kind,
+      role: connection.role,
+      reason,
+    });
+    return;
+  }
 
   room.connections.delete(clientId);
   if (room.displayClientId === clientId) room.displayClientId = null;
+  clearDisconnectTimer(room, clientId);
 
   logSignal("connection_removed", {
     sessionId,
     clientId,
     kind: connection.kind,
     role: connection.role,
+    reason,
     remainingConnections: room.connections.size,
   });
   broadcast(room, { type: "peer_left", clientId }, clientId);
   cleanupRoomIfEmpty(sessionId);
+}
+
+function scheduleRemoveConnection(
+  sessionId: string,
+  clientId: string,
+  socket: WebSocket,
+  reason: string,
+) {
+  const room = roomsBySessionId.get(sessionId);
+  if (!room) return;
+
+  clearDisconnectTimer(room, clientId);
+  const timer = setTimeout(() => {
+    const activeRoom = roomsBySessionId.get(sessionId);
+    if (!activeRoom) return;
+    activeRoom.disconnectTimers.delete(clientId);
+    removeConnection(sessionId, clientId, socket, reason);
+  }, RECONNECT_GRACE_MS);
+  room.disconnectTimers.set(clientId, timer);
+  logSignal("connection_remove_scheduled", {
+    sessionId,
+    clientId,
+    reason,
+    graceMs: RECONNECT_GRACE_MS,
+  });
 }
 
 function closeExistingHost(room: VillageSignalRoom, nextClientId: string) {
@@ -303,6 +357,7 @@ export const handler = define.handlers({
       }
 
       socket.addEventListener("open", () => {
+        clearDisconnectTimer(room, clientId);
         room.displayClientId = clientId;
         room.connections.set(clientId, {
           clientId,
@@ -383,11 +438,11 @@ export const handler = define.handlers({
           reason: event.reason,
           wasClean: event.wasClean,
         });
-        removeConnection(sessionId, clientId);
+        scheduleRemoveConnection(sessionId, clientId, socket, "close");
       });
       socket.addEventListener("error", () => {
         logSignal("display_socket_error", { sessionId, clientId });
-        removeConnection(sessionId, clientId);
+        scheduleRemoveConnection(sessionId, clientId, socket, "error");
       });
       return response;
     }
@@ -420,6 +475,7 @@ export const handler = define.handlers({
     if (role === "host") closeExistingHost(room, clientId);
 
     socket.addEventListener("open", () => {
+      clearDisconnectTimer(room, clientId);
       room.connections.set(clientId, {
         clientId,
         kind: "controller",
@@ -490,7 +546,7 @@ export const handler = define.handlers({
         reason: event.reason,
         wasClean: event.wasClean,
       });
-      removeConnection(room.sessionId, clientId);
+      scheduleRemoveConnection(room.sessionId, clientId, socket, "close");
     });
     socket.addEventListener("error", () => {
       logSignal("controller_socket_error", {
@@ -498,7 +554,7 @@ export const handler = define.handlers({
         clientId,
         role,
       });
-      removeConnection(room.sessionId, clientId);
+      scheduleRemoveConnection(room.sessionId, clientId, socket, "error");
     });
     return response;
   },
